@@ -141,7 +141,9 @@ install.sh                           optional one-time setup
 
 ### Settings
 
-A shell-style file, kept in `printer-config` (e.g. under `firmware/`):
+A shell-style file at `firmware/mcu-flash.conf` in `printer-config`, next to
+the board's kconfig (`firmware/<board>.config`). Decided 2026-10-02. This
+repo ships only `examples/mcu-flash.conf`.
 
 ```sh
 KLIPPER_DIR=/home/<user>/klipper
