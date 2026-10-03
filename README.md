@@ -5,8 +5,8 @@ flash it to the printer's controller board, from a
 [Cockpit](https://cockpit-project.org/) page.
 
 > **Status:** work in progress. The command-line worker and the systemd
-> service exist but have not flashed a board yet; the Cockpit page is still
-> to come.
+> service work and have flashed a BTT SKR 1.3; the Cockpit page is still to
+> come.
 
 ## Why
 
@@ -58,9 +58,14 @@ cp ~/cockpit-klipper/examples/mcu-flash.conf ~/printer_data/config/firmware/   #
 ```
 
 Then `~/cockpit-klipper/bin/klipper-mcu-flash status` shows where things
-stand, and `systemctl start --no-block cockpit-klipper-flash.service` runs a
-build and flash. Follow it with
-`journalctl -f -o cat -u cockpit-klipper-flash.service`.
+stand. To build and flash, and follow the log until the run ends:
+
+```sh
+t=$(date '+%F %T'); sudo systemctl start --no-block cockpit-klipper-flash.service &&
+    journalctl -f -o cat -u cockpit-klipper-flash.service --since "$t" | sed '/^Run finished:/q'
+```
+
+The last line says how the run ended, e.g. `Run finished: success`.
 
 ## Requirements
 
@@ -69,6 +74,23 @@ build and flash. Follow it with
   `binutils-arm-none-eabi` and `libnewlib-arm-none-eabi` for ARM boards
 - Cockpit on the printer host
 - For SD-card flashing: a FAT/FAT32 SD card in the board's slot
+
+## Troubleshooting
+
+**"Failed to Initialize SD Card. Is it inserted?"** Klipper's flasher only
+says why when it runs verbosely. Stop Klipper and run a check, which
+starts the card up the same way but does not upload anything:
+
+```sh
+sudo systemctl stop klipper
+~/klippy-env/bin/python ~/klipper/scripts/spi_flash/spi_flash.py -c -v \
+    /dev/serial/by-id/<your board> <board name> ~/.cache/klipper-mcu-flash/out/klipper.bin
+sudo systemctl start klipper
+```
+
+If the card answers but "did not come out of IDLE after reset", the card
+itself is at fault: try another one (32 GB or smaller, FAT32). Otherwise
+see "Failure to Initialize" in Klipper's `docs/SDCard_Updates.md`.
 
 ## License
 

@@ -6,13 +6,12 @@ to the printer's controller board. Klipper host updates still happen in
 Mainsail's Update Manager. Afterwards the tool brings the board to the same
 version safely, in one click.
 
-Status (2026-10-03): the worker `bin/klipper-mcu-flash` exists and passes
-its tests on the dev machine (see "Working here"). On the printer host,
-`status`, `build` and `preflight` work: the SKR 1.3 build validated against
-the board, and `preflight` refuses with the printer off and passes with it
-on. The systemd unit is installed there, and the failure-path tests
-passed: printer off and print running (see "The unit"). No board has been
-flashed yet. The Cockpit page is not written.
+Status (2026-10-03): the worker `bin/klipper-mcu-flash` and the systemd
+unit work on the printer host; the worker's tests also pass on the dev
+machine (see "Working here"). On 2026-10-03 the unit flashed the CR-10S's
+SKR 1.3 from v0.13.0-745 to v0.13.0-786, with Klipper down for 14 s (see
+"The unit"). The failure paths were tested first: printer off, print
+running, and a bad SD card. The Cockpit page is not written.
 This file began as a handoff from a session in the private `printer-config`
 repo. Facts marked **(verified)** were checked against the printer or the
 upstream source on that date.
@@ -79,7 +78,22 @@ Keep the tool generic.
   - Klipper must be stopped. Both Klipper (`serialhdl.py`) and the flasher
     open the port with `exclusive=True`.
   - A FAT/FAT32 SD card must be in the board's slot.
-  - `-s` (4 MHz SPI) helps if the card fails to initialise.
+  - `-s` (4 MHz SPI) helps some cards that fail to initialise at the
+    default 400 kHz, according to Klipper's docs. It did not help the
+    CR-10S's card (2026-10-03).
+- **`spi_flash.py` hides why an SD card failed to initialise** (verified
+  2026-10-03). FatFS's initialise callback (`_fatfs_cb_initialize`)
+  catches every exception and logs it only at debug level. Without `-v`,
+  every card problem reads "Failed to Initialize SD Card. Is it
+  inserted?" (`FR_NOT_READY`). To see the failing step, stop Klipper and
+  run `spi_flash.py -c -v <device> <board> <klipper.bin>` by hand. `-c`
+  goes through the same reset and card start-up but only reads the card.
+  - The CR-10S's card answered CMD0 and CMD8, then never finished ACMD41
+    ("SD Card did not come out of IDLE after reset"). `_check_command`
+    tries 15 times, 0.1 s apart. That is a fault of the card itself,
+    whatever the SPI speed.
+  - A replacement card (120 MiB, standard capacity, FAT32) worked at the
+    default 400 kHz, with both the flasher and the board's bootloader.
 - **Build:**
   `make -C <klipper> KCONFIG_CONFIG=<file> OUT=<dir>/ olddefconfig`, then
   the same with `-j"$(nproc)"` instead of `olddefconfig`.
@@ -263,6 +277,20 @@ worker's full path and Klipper's service name, then installs it as
   ran by hand rather than through the unit so that a check that wrongly
   passed could not lead to an unplanned flash. The printer-off run had
   already shown how the unit handles a refusal at that step.
+- **First flash attempts, 2026-10-03:** two runs, at 400 kHz and with
+  `-s`. Each time the unit stopped Klipper, and `spi_flash.py` connected,
+  reset the board and reconnected. Then it failed to initialise the SD
+  card (see "How flashing works"). The run ended `Run finished:
+  exit-code`, and Klipper was started again after 14 s, still with the
+  old firmware. Mainsail's Update Manager had moved Klipper from 756 to
+  786 just before. The build of 786 validated against the board (41
+  commits behind) without trouble.
+- **First flash, 2026-10-03,** after the SD card was replaced:
+  `sudo systemctl start` built 786 and stopped Klipper. `spi_flash.py`
+  then uploaded and checked `firmware.bin` (42 KB), the bootloader
+  installed it, and the dictionary check matched. Klipper started 14 s
+  after it was stopped and reported `mcu_version` v0.13.0-786-g461c4e372.
+  The whole run took 17 s and logged `Run finished: success`.
 
 ### The worker (`bin/klipper-mcu-flash`)
 
@@ -319,6 +347,9 @@ journal and the page.
     result.
   - Send a `RESPOND` through the API socket's `gcode/script` so Mainsail
     and KlipperScreen show what happened.
+  - Show why the SD card failed to initialise. One way: run the flasher
+    with `-v` and keep its debug log (stderr) out of the journal, in
+    `BUILD_DIR`. After a failure, print its `flash_sdcard:` errors.
 
 ### The page
 
@@ -373,7 +404,8 @@ ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu  # once the p
   which means opening the printer's control box. Mitigation: validate the
   dictionary before Klipper is stopped.
 - **No SD card or a bad one:** the upload fails and the old firmware
-  stays. Klipper is restarted and nothing changes.
+  stays. Klipper is restarted and nothing changes (verified 2026-10-03,
+  with a card that would not finish initialising).
 - **Klipper restarted from Mainsail or KlipperScreen mid-flash:** both
   processes want the port exclusively, so verification may fail. Re-run
   it; the firmware is usually already written. Masking Klipper during the
@@ -397,8 +429,8 @@ ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu  # once the p
 - **Printer powered off:** the device is missing. Fail fast with a clear
   message before anything is stopped.
 - **During a print:** `preflight` refuses.
-- **Downtime:** Klipper is down for roughly a minute per flash (an
-  estimate).
+- **Downtime:** Klipper is down for about 15 s per flash (14 s measured
+  on the SKR 1.3, 2026-10-03). The build runs before Klipper stops.
 
 ## Working here
 
@@ -438,10 +470,12 @@ ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu  # once the p
   2. Install the unit and test the failure paths first: printer powered off
      (must fail before Klipper is stopped, and must not start Klipper),
      then a print running (must refuse). Only then a real flash, with the
-     printer idle. Both tests passed on 2026-10-03.
+     printer idle. Both tests passed on 2026-10-03, and so did the first
+     real flash.
   3. Build the page last and test it in Cockpit.
   4. After the first real flash, confirm the board's `mcu_version` equals
-     the host version in klippy.log or Mainsail.
+     the host version in klippy.log or Mainsail. Done 2026-10-03: both
+     v0.13.0-786-g461c4e372.
 - `printer-config` workflow: edit → commit → push to Gitea → the printer
   pulls through Mainsail's Update Manager. Printer-side edits go back with
   the `PUSH_CONFIG` macro. Files there also appear in Mainsail's config
