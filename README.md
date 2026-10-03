@@ -96,6 +96,11 @@ If the card answers but "did not come out of IDLE after reset", the card
 itself is at fault: try another one (32 GB or smaller, FAT32). Otherwise
 see "Failure to Initialize" in Klipper's `docs/SDCard_Updates.md`.
 
+**"Error Uploading Firmware"** with `write error 0x..` or `could not leave
+busy state after write`: the card starts up but fails while writing. Try
+another card, preferably a name-brand one. The board keeps its old
+firmware.
+
 ## License
 
 GNU GPLv3, the same as Klipper and Moonraker. See [LICENSE](LICENSE).

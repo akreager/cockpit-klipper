@@ -571,13 +571,29 @@ def flasher(settings):
 LOG_RECORD = re.compile(r"(DEBUG|INFO|WARNING|ERROR|CRITICAL):[^:]*:(.*)$")
 
 
+def last_exception(lines):
+    """The exception at the end of a printed traceback: the one a handler
+    caught, after any it was raised while handling. Its message may span
+    lines."""
+    starts = [i for i, l in enumerate(lines) if l.startswith("Traceback ")]
+    found = []
+    for line in lines[starts[-1] + 1:] if starts else ():
+        if not found and line[:1].isspace():
+            continue
+        if not line:
+            break
+        found.append(line)
+    return "; ".join(found)
+
+
 def flasher_errors(path):
-    """The errors in the flasher's debug log, each with its exception.
+    """The flasher's own errors in its debug log, each with its exception.
 
     With -v, spi_flash.py logs LEVEL:logger:message lines to stderr, and
-    logging.exception() adds a traceback whose last unindented line is the
-    exception. Output before the first record, e.g. a crash on import,
-    counts as an error too."""
+    its logging.exception() calls add a traceback through spi_flash.py.
+    Errors from Klipper's serial code while it reconnects after the reset
+    are left out: they are retries. Output before the first record, e.g.
+    a crash on import or an argument error, counts too."""
     records = [(None, [])]
     try:
         with open(path, errors="replace") as f:
@@ -592,14 +608,16 @@ def flasher_errors(path):
         return []
     errors = []
     for level, lines in records:
-        if level not in (None, "ERROR", "CRITICAL"):
+        if level is None:
+            exc = last_exception(lines)
+            plain = [l for l in lines if l and not l[0].isspace()]
+            text = exc or (plain[-1] if plain else None)
+        elif level in ("ERROR", "CRITICAL") and any(
+                'spi_flash.py"' in l for l in lines[1:]):
+            exc = last_exception(lines[1:])
+            text = "%s (%s)" % (lines[0], exc) if exc else lines[0]
+        else:
             continue
-        msg, rest = (lines[0], lines[1:]) if level else (None, lines)
-        exc = [l for l in rest if l and not l[0].isspace()
-               and not l.startswith(("Traceback ", "During handling ",
-                                     "The above exception "))]
-        text = ("%s (%s)" % (msg, exc[-1]) if msg and exc
-                else msg or (exc[-1] if exc else None))
         if text and text not in errors:
             errors.append(text)
     return errors
@@ -705,15 +723,16 @@ def cmd_report(settings, args):
         if state and state != "startup":
             break
         elapsed = time.monotonic() - start
+        starting = bool(state) or service_state(settings) in (
+            "active", "activating", "reloading", "refreshing")
         # Allow a moment for the start that the unit has just queued.
-        if (not state and elapsed >= 3 and service_state(settings)
-                not in ("active", "activating", "reloading", "refreshing")):
+        if not starting and elapsed >= 3:
             say("Klipper is not running, so what the board runs is not "
                 "known until it starts")
             return
         if elapsed >= args.timeout:
             raise Error("Klipper has not finished starting after %d s" % elapsed)
-        if not waiting:
+        if starting and not waiting:
             say("Waiting for Klipper (up to %d s)" % args.timeout)
             waiting = True
         time.sleep(1)
@@ -725,13 +744,14 @@ def cmd_report(settings, args):
     if not version:
         raise Error("Klipper is %s and has not identified the board: %s"
                     % (state, message))
-    if commit_of(settings, version) == flashed.get("commit"):
+    if flashed.get("result") != "success":
+        say("The board still runs %s; the flash %s" % (
+            version, "failed" if flashed.get("result") else "did not finish"))
+    elif commit_of(settings, version) == flashed.get("commit"):
         say("The board runs %s, the build that was flashed" % version)
-    elif flashed.get("result") == "success":
+    else:
         raise Error("the board runs %s, not the build that was flashed (%s)"
                     % (version, flashed.get("version")))
-    else:
-        say("The board runs %s" % version)
     if state != "ready":
         raise Error("Klipper is %s: %s" % (state, message))
 

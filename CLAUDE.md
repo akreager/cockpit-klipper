@@ -96,6 +96,17 @@ Keep the tool generic.
     whatever the SPI speed.
   - A replacement card (120 MiB, standard capacity, FAT32) worked at the
     default 400 kHz, with both the flasher and the board's bootloader.
+    It is a no-name card (CID maker 0xC8, product "APPSD", made "5/2165").
+  - Later the same card failed twice while writing `firmware.bin` (15:27
+    and 15:29). It started up and mounted fine, but returned garbage
+    data-response tokens (`write error 0xC3`, `0x86`, `0x00`) or stayed
+    busy (`could not leave busy state after write`; the flasher polls 128
+    times, one USB round trip each). The board was unaffected: Klipper
+    reset it after each run, its bootloader saw whatever was left on the
+    card, and it still booted 786.
+- **Klipper bug (at 786):** `FatFile.close()` in `spi_flash.py` logs a
+  failed close with `%d` but passes the `FRESULT` name, a string. The
+  resulting `TypeError` hides the close error. Not yet reported upstream.
 - **Build:**
   `make -C <klipper> KCONFIG_CONFIG=<file> OUT=<dir>/ olddefconfig`, then
   the same with `-j"$(nproc)"` instead of `olddefconfig`.
@@ -348,11 +359,14 @@ journal and the page.
   - The flasher's progress (stdout) goes to the journal. Its `-v` debug log
     (stderr) goes to `BUILD_DIR/flash.log`, which also keeps the journal
     free of its noise.
-  - On failure it prints each `ERROR` record of that log with the last
-    line of its traceback, e.g. `error: flash_sdcard: error initializing
-    sdcard (OSError: flash_sdcard: SD Card did not come out of IDLE after
-    reset)`. Output before the first record, e.g. a crash on import,
-    counts as an error too.
+  - On failure it prints each `ERROR` record of that log whose traceback
+    runs through `spi_flash.py`, with the exception that handler caught
+    (the last in the chain, all its lines), e.g. `error: flash_sdcard:
+    error initializing sdcard (OSError: flash_sdcard: SD Card did not
+    come out of IDLE after reset)`. Errors from `serialhdl.py` while the
+    flasher reconnects after the reset are retries and are left out.
+    Output before the first record, e.g. a crash on import or an argument
+    error, counts too.
   - Before the upload it writes `BUILD_DIR/flash.json` (version, commit,
     start time, systemd's `$INVOCATION_ID`), and adds the result after.
 - **`report [--timeout 60]`:** runs from `ExecStopPost=` after Klipper has
@@ -362,8 +376,9 @@ journal and the page.
     ExecStopPost lines the same ID (tested 2026-10-03). By hand it reports
     on the last flash.
   - It waits until Klipper's state is no longer `startup`, then prints the
-    state and the board's `mcu_version`, and says whether that is the
-    flashed build's commit.
+    state and the board's `mcu_version`. After a successful flash it says
+    whether that is the flashed build's commit; after a failed one, that
+    the board still runs it.
   - It gives up if Klipper's service is not running after 3 s (the start
     the unit queued with `--no-block` needs a moment), or after the
     timeout. The timeout stays below systemd's default 90 s stop timeout.
@@ -376,8 +391,14 @@ journal and the page.
 - **`flash -v` and `report` (2026-10-03)** were tested in a scratch
   `BUILD_DIR` with a stand-in flasher: a card failure, a crash on import,
   success, and `report` against the real Klipper (read-only), a run that
-  did not flash, a missing service and a timeout. They are not yet in the
-  installed unit, and no real flash has run them.
+  did not flash, a missing service and a timeout. Installed at 15:26; the
+  two real runs that followed failed at the upload (see "How flashing
+  works") and showed three faults, fixed since:
+  - `report` called the board's firmware "the build that was flashed"
+    after a failed flash, because the board already ran that commit.
+  - The error list included `serialhdl.py` reconnect retries and kept only
+    the last line of a two-line exception message.
+  - `report` printed "Waiting for Klipper" while Klipper was stopped.
 
 ### The page
 
