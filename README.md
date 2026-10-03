@@ -5,8 +5,8 @@ flash it to the printer's controller board, from a
 [Cockpit](https://cockpit-project.org/) page.
 
 > **Status:** work in progress. The command-line worker and the systemd
-> service work and have flashed a BTT SKR 1.3; the Cockpit page is still to
-> come.
+> service work and have flashed a BTT SKR 1.3. The Cockpit page is new and
+> not yet well tested.
 
 ## Why
 
@@ -22,7 +22,7 @@ This tool does that in one click, outside Klipper:
 - Macros cannot run at all while Klipper is in an error state, which is
   exactly when a flash is needed.
 
-## How it will work
+## How it works
 
 - **A oneshot systemd service does the work.** It builds the firmware as
   your user while Klipper is still running, checks the build against the
@@ -45,7 +45,7 @@ flashed with Klipper's own SD-card flasher (`scripts/spi_flash/`, which
 `flash-sdcard.sh` supports should work with their own Klipper config. Boards
 that need another flash method (DFU, Katapult) are not covered yet.
 
-## Install (so far)
+## Install
 
 On the printer host, as the user Klipper runs as:
 
@@ -55,10 +55,19 @@ mkdir -p ~/printer_data/config/firmware
 cp ~/klipper/.config ~/printer_data/config/firmware/my-board.config   # your board's menuconfig
 cp ~/cockpit-klipper/examples/mcu-flash.conf ~/printer_data/config/firmware/   # then edit it
 ~/cockpit-klipper/install.sh      # installs cockpit-klipper-flash.service; asks for sudo
+mkdir -p ~/.local/share/cockpit
+ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu
 ```
 
-Then `~/cockpit-klipper/bin/klipper-mcu-flash status` shows where things
-stand. To build and flash, and follow the log until the run ends:
+The page is *Klipper MCU* under *Tools* in Cockpit. It shows the host and
+board versions, builds without flashing, and starts and follows a flash
+run. Flashing needs Cockpit's administrative access, and the page reads
+the run's log from the system journal, which needs membership of the
+`adm` or `systemd-journal` group.
+
+Without the page, `~/cockpit-klipper/bin/klipper-mcu-flash status` shows
+where things stand. To build and flash, and follow the log until the run
+ends:
 
 ```sh
 t=$(date '+%F %T'); sudo systemctl start --no-block cockpit-klipper-flash.service &&

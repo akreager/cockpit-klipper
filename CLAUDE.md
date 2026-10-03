@@ -11,7 +11,9 @@ unit work on the printer host; the worker's tests also pass on the dev
 machine (see "Working here"). On 2026-10-03 the unit flashed the CR-10S's
 SKR 1.3 from v0.13.0-745 to v0.13.0-786, with Klipper down for 14 s (see
 "The unit"). The failure paths were tested first: printer off, print
-running, and a bad SD card. The Cockpit page is not written.
+running, and a bad SD card. The Cockpit page (`cockpit/`) works in
+Cockpit 362: Build only, and a Build and flash run that failed at the SD
+card.
 This file began as a handoff from a session in the private `printer-config`
 repo. Facts marked **(verified)** were checked against the printer or the
 upstream source on that date.
@@ -171,7 +173,9 @@ Keep the tool generic.
   `/usr/share/cockpit/`. Packages in `~/.local/share/cockpit` are **not
   cached**, so a symlink to a git checkout picks up changes on reload.
 - **Manifest:**
-  `{"version": 0, "require": {"cockpit": "…"}, "conditions": [{"path-exists": "…"}], "tools": {"klipper-mcu": {"label": "Klipper MCU", "path": "index.html"}}}`.
+  `{"version": 0, "requires": {"cockpit": "…"}, "conditions": [{"path-exists": "…"}], "tools": {"index": {"label": "Klipper MCU"}}}`.
+  The key is `requires` (as in Cockpit 362's own manifests). A menu key
+  names its page: `index` is `index.html`.
 - **Strict CSP by default:** no inline scripts or styles and nothing
   external. Ship the JS and CSS as files and load `../base1/cockpit.js`.
 - **APIs:**
@@ -182,9 +186,21 @@ Keep the tool generic.
     Klipper's API socket directly without Moonraker.
   - `cockpit.http(port | unix path)` and `cockpit.file()`.
 - **Version:** the first target host runs Cockpit 362. Do not raise the
-  manifest's `require` above what the page actually needs.
-- **Not yet checked:** how a hand-written page follows Cockpit's
-  light/dark theme.
+  manifest's `requires` above what the page actually needs; the page sets
+  none.
+- **Theme (verified in Cockpit 362, 2026-10-03):**
+  - Each of Cockpit's pages bundles PatternFly and its own copy of the theme
+    code. `base1` ships only `cockpit.js` and translations.
+  - The theme code sets the class `pf-v6-theme-dark` on `<html>` from
+    `localStorage["shell:style"]` (`auto`, `light` or `dark`; `auto`
+    follows `prefers-color-scheme`). It re-applies it on the `storage`
+    event, on the shell's `cockpit-style` CustomEvent (`detail.style`) and
+    on a change of `prefers-color-scheme`. `mcu.js` does the same.
+  - Cockpit's fonts are in `/cockpit/static/fonts/`, i.e.
+    `../../static/fonts/` from a page's CSS.
+- **Admin access:** `cockpit.permission({admin: true}).allowed` says whether
+  the session has administrative access. Cockpit reloads the page when that
+  changes.
 
 ## Design
 
@@ -195,7 +211,7 @@ README.md  LICENSE
 bin/klipper-mcu-flash                worker: status | build | preflight | flash | report (written)
 examples/mcu-flash.conf              every setting, with defaults                  (written)
 systemd/cockpit-klipper-flash.service  unit template                              (written)
-cockpit/                             the page: manifest.json index.html mcu.js mcu.css (to do)
+cockpit/                             the page: manifest.json index.html mcu.js mcu.css (written)
 install.sh                           renders and installs the unit (uses sudo)     (written)
 ```
 
@@ -400,31 +416,59 @@ journal and the page.
     the last line of a two-line exception message.
   - `report` printed "Waiting for Klipper" while Klipper was stopped.
 
-### The page
+### The page (`cockpit/`)
 
-- **Status:**
-  - `klipper-mcu-flash status --json` gives the versions, how far apart
-    they are, whether the board is connected, Klipper state and print
-    state, and the last build.
-  - Last run result: the last `Run finished: <result>` line in the unit's
-    journal. `systemctl show -p Result` won't do, because systemd unloads a
-    successful oneshot and forgets its result.
-- **Build only:** runs `klipper-mcu-flash build` directly as the logged-in
-  user, with output streamed live. Klipper is not stopped.
-- **Build & flash:**
-  - Disabled while the unit runs, while printing, or when the board is
-    absent. When the board
-    is absent the page says the printer looks switched off and leaves it at
-    that: no power-on button through Moonraker (decided 2026-10-02).
-  - After a confirmation, run
-    `systemctl start --no-block cockpit-klipper-flash.service` with
-    `superuser: "require"`.
-  - Stream `journalctl -f -o cat -u cockpit-klipper-flash.service` and show
-    the result once the unit is inactive or failed. The run's `report`
-    lines say whether Klipper came back and what the board runs; then read
-    `status --json` again.
-  - While a run is in progress, warn not to switch the printer, not to
-    update or restart Moonraker, and not to restart Klipper.
+Plain HTML, CSS and JS: no build step and no PatternFly, which Cockpit 362
+ships only inside its own pages' bundles. It is installed by symlinking
+`cockpit/` to `~/.local/share/cockpit/klipper-mcu`. The manifest's
+`conditions` hide it until the unit is installed.
+
+- **Worker and settings:** the page reads the unit with `systemctl show -p
+  LoadState -p ExecStart -p Environment`. It runs the worker named in
+  `ExecStart` (`path=`), with the unit's `KLIPPER_MCU_FLASH_CONF` if one is
+  set. The page and the unit therefore always use the same worker and
+  settings.
+- **Status:** `status --json`, read on load, after each build and run, on
+  Refresh, and every 30 s while the page is visible and idle.
+- **Runs:** the page follows a run by its invocation ID, with `journalctl
+  --follow --lines=all -o json _SYSTEMD_INVOCATION_ID=<id>`. That shows
+  every line of the run from its start, the root lines too, and the page
+  stops at `Run finished:`. It shows the first `error:` line as the reason
+  for a failure.
+  - It watches the unit's `ActiveState` over D-Bus. It calls
+    `Manager.Subscribe` first: systemd sends property changes only while a
+    client is subscribed. On each change it reads `ActiveState` and
+    `InvocationID` with `systemctl show`. It shows any run it has not shown
+    yet, so a run started from the CLI or Cockpit's *Services* page, or one
+    in progress when the page opens, appears too.
+  - On load it shows the last run. That is the unit's `InvocationID`, or,
+    once systemd has unloaded a successful oneshot and forgotten it, the
+    `_SYSTEMD_INVOCATION_ID` of the last `Run finished:` line
+    (`journalctl --grep`, which exits 1 when nothing matches).
+  - If the unit has stopped and no `Run finished:` line arrives within
+    3 s, the page shows the run as "Ended".
+  - Reading the system journal needs the `adm` or `systemd-journal`
+    group. Allen is in `adm`.
+- **Build only:** runs `build` as the logged-in user and streams its
+  output. Klipper is not stopped. Closing the page kills the build, which
+  is harmless: `build` deletes the previous record first.
+- **Build and flash:**
+  - Disabled while a run or a build is in progress, without administrative
+    access, when the status could not be read, while printing, or when the
+    board is absent. In that last case the page says the printer looks
+    switched off and leaves it at that: no power-on button through
+    Moonraker (decided 2026-10-02).
+  - After an inline confirmation, the page runs `systemctl start
+    --no-block cockpit-klipper-flash.service` with `superuser: "require"`.
+    It then polls for up to 15 s until `InvocationID` changes.
+  - While a run is in progress, a warning says not to switch the printer
+    off, restart Klipper, or update or restart Moonraker.
+- **Tested 2026-10-03** in Node, with a stub DOM whose `cockpit.spawn` ran
+  the real commands (the root start was only logged). Passed: the status,
+  the last run's log and result, the start path up to the polling, no
+  admin access, the dark theme, and a real Build only. The same day Allen
+  tried it in Cockpit (dark theme): Build only, and a Build and flash run
+  that failed at the SD card, as expected with that card.
 - **Privileges:** starting the unit uses Cockpit's administrative access.
   Optional later: a polkit rule that lets the Klipper user start just this
   unit without admin mode.
@@ -435,16 +479,8 @@ journal and the page.
 git clone https://github.com/akreager/cockpit-klipper.git ~/cockpit-klipper
 cp ~/klipper/.config ~/printer_data/config/firmware/<board>.config   # commit it in printer-config
 ~/cockpit-klipper/install.sh            # as the Klipper user; -n previews, -k names Klipper's service
-ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu  # once the page exists
+ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu
 ```
-
-## Open design points
-
-- **Settings path for the unit and the page:** both can rely on the
-  worker's default path. If the file lives elsewhere, the unit needs an
-  `Environment=KLIPPER_MCU_FLASH_CONF=…` line, and the page must use the
-  same value, e.g. read from `systemctl show -p Environment`.
-- How the page follows Cockpit's light/dark theme.
 
 ## Risks and failure modes
 
