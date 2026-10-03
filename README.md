@@ -4,7 +4,9 @@ Build Klipper's MCU firmware from the Klipper source on your printer host and
 flash it to the printer's controller board, from a
 [Cockpit](https://cockpit-project.org/) page.
 
-> **Status:** design stage. There is nothing to install yet.
+> **Status:** work in progress. The command-line worker exists but has not
+> flashed a board yet; the systemd service and the Cockpit page are still to
+> come.
 
 ## Why
 
@@ -38,7 +40,8 @@ This tool does that in one click, outside Klipper:
 ## Boards
 
 The first target is the BTT SKR 1.3 (LPC1768) with its SD-card bootloader,
-flashed with Klipper's own `scripts/flash-sdcard.sh`. Other boards that
+flashed with Klipper's own SD-card flasher (`scripts/spi_flash/`, which
+`flash-sdcard.sh` runs). Other boards that
 `flash-sdcard.sh` supports should work with their own Klipper config. Boards
 that need another flash method (DFU, Katapult) are not covered yet.
 

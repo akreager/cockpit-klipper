@@ -1,0 +1,623 @@
+#!/usr/bin/env python3
+# Build Klipper MCU firmware from the installed Klipper source and flash it
+# to a board with an SD-card bootloader.
+#
+# This file may be distributed under the terms of the GNU GPLv3 license.
+"""Build Klipper MCU firmware and flash it to the printer's board.
+
+Commands:
+  status      host and board versions, Klipper state, last build
+  build       build into BUILD_DIR and validate against the board's firmware
+  preflight   refuse unless a flash can start now (run before stopping Klipper)
+  flash       flash the last validated build (Klipper must be stopped)
+
+Only `flash` needs Klipper stopped; the systemd unit runs
+build -> preflight -> stop Klipper -> flash -> start Klipper.
+"""
+
+import argparse
+import ast
+import datetime
+import fcntl
+import glob
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+
+DEFAULT_SETTINGS = "~/printer_data/config/firmware/mcu-flash.conf"
+REQUIRED = ("KLIPPER_DIR", "KCONFIG", "DEVICE", "BOARD")
+DEFAULTS = {
+    "KLIPPY_ENV": "~/klippy-env",
+    "KLIPPY_SOCKET": "~/printer_data/comms/klippy.sock",
+    "KLIPPY_LOG": "~/printer_data/logs/klippy.log",
+    "KLIPPER_SERVICE": "klipper",
+    "BUILD_DIR": "~/.cache/klipper-mcu-flash",
+    "FLASH_ARGS": "",
+    "FLASH_APPLICATION_ADDRESS": "",
+}
+PATH_KEYS = ("KLIPPER_DIR", "KCONFIG", "DEVICE", "KLIPPY_ENV",
+             "KLIPPY_SOCKET", "KLIPPY_LOG", "BUILD_DIR")
+# Constants that identify the chip and its comms; a build must match the
+# board's running firmware in all of them.
+IDENTITY_CONSTANTS = ("MCU", "CLOCK_FREQ")
+IDENTITY_PREFIXES = ("RESERVE_PINS_",)
+
+
+class Error(Exception):
+    pass
+
+
+def say(msg=""):
+    print(msg, flush=True)
+
+
+######################################################################
+# Settings
+######################################################################
+
+def load_settings(path):
+    settings = dict(DEFAULTS)
+    try:
+        f = open(path)
+    except OSError as e:
+        raise Error("cannot read settings file %s: %s" % (path, e.strerror))
+    with f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, sep, raw = line.partition("=")
+            key = key.strip()
+            if not sep or not re.match(r"[A-Z_][A-Z0-9_]*$", key):
+                raise Error("%s:%d: expected KEY=value" % (path, lineno))
+            if key not in DEFAULTS and key not in REQUIRED:
+                raise Error("%s:%d: unknown setting %s" % (path, lineno, key))
+            try:
+                words = shlex.split(raw, comments=True)
+            except ValueError as e:
+                raise Error("%s:%d: %s" % (path, lineno, e))
+            if len(words) > 1:
+                raise Error("%s:%d: quote values that contain spaces"
+                            % (path, lineno))
+            settings[key] = words[0] if words else ""
+    missing = [k for k in REQUIRED if not settings.get(k)]
+    if missing:
+        raise Error("%s: missing %s" % (path, ", ".join(missing)))
+    for key in PATH_KEYS:
+        settings[key] = os.path.expanduser(settings[key])
+    for key in PATH_KEYS:
+        if not os.path.isabs(settings[key]):
+            raise Error("%s: %s must be an absolute path" % (path, key))
+    settings["_path"] = path
+    return settings
+
+
+######################################################################
+# Klipper's API socket (docs/API_Server.md)
+######################################################################
+
+class KlippyStatus:
+    def __init__(self, running, info=None, objects=None):
+        self.running = running
+        self.info = info or {}
+        self.objects = objects or {}
+
+
+def klippy_request(sock, req_id, method, params):
+    msg = {"id": req_id, "method": method, "params": params}
+    sock.sendall(json.dumps(msg).encode() + b"\x03")
+    buf = b""
+    while True:
+        while b"\x03" not in buf:
+            data = sock.recv(65536)
+            if not data:
+                raise Error("Klipper closed its API socket")
+            buf += data
+        raw, _, buf = buf.partition(b"\x03")
+        reply = json.loads(raw)
+        if reply.get("id") != req_id:
+            continue
+        if "error" in reply:
+            err = reply["error"]
+            raise Error("Klipper: %s" % (err.get("message", err),))
+        return reply["result"]
+
+
+def klippy_status(settings, objects, timeout=5.):
+    """Klipper's state and the requested status objects.
+
+    A missing socket or a refused connection means Klipper is not running.
+    A socket that does not answer is an error: its state is unknown."""
+    path = settings["KLIPPY_SOCKET"]
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        try:
+            sock.connect(path)
+        except (FileNotFoundError, ConnectionRefusedError):
+            return KlippyStatus(False)
+        info = klippy_request(sock, 1, "info", {})
+        result = klippy_request(sock, 2, "objects/query", {"objects": objects})
+        return KlippyStatus(True, info, result.get("status", {}))
+    except socket.timeout:
+        raise Error("Klipper's API socket %s did not answer within %d s"
+                    % (path, timeout))
+    except ValueError:
+        raise Error("Klipper sent an unreadable reply on %s" % path)
+    except OSError as e:
+        raise Error("cannot talk to Klipper on %s: %s" % (path, e))
+    finally:
+        sock.close()
+
+
+######################################################################
+# Versions
+######################################################################
+
+def git(settings, *args):
+    try:
+        res = subprocess.run(["git", "-C", settings["KLIPPER_DIR"]] + list(args),
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             universal_newlines=True)
+    except OSError:
+        return None
+    return res.stdout.strip() if res.returncode == 0 else None
+
+
+def commit_of(settings, version):
+    # Firmware versions look like v0.13.0-745-gf0892d82b, optionally followed
+    # by -dirty-<build time>-<host> when built from a modified checkout.
+    m = re.search(r"-g([0-9a-f]{7,40})(?![0-9a-f])", version or "")
+    if not m:
+        return None
+    return git(settings, "rev-parse", "--verify", "--quiet",
+               m.group(1) + "^{commit}")
+
+
+def count_commits(settings, rev_range):
+    out = git(settings, "rev-list", "--count", rev_range)
+    return int(out) if out and out.isdigit() else None
+
+
+LOG_VERSION = re.compile(r"Loaded MCU 'mcu' \d+ commands \((\S+) / (.*)\)\s*$")
+LOG_CONSTANTS = re.compile(r"MCU 'mcu' config: (.*?)\s*$")
+LOG_KCONFIG = re.compile(r"MCU 'mcu' kconfig: (.*?)\s*$")
+
+
+def scan_log(path):
+    """The last firmware report for MCU 'mcu' in one klippy.log file."""
+    last = cur = None
+    try:
+        f = open(path, errors="replace")
+    except OSError:
+        return None
+    with f:
+        for line in f:
+            if "MCU 'mcu' " not in line:
+                continue
+            m = LOG_VERSION.search(line)
+            if m:
+                cur = last = {"version": m.group(1),
+                              "build_versions": m.group(2),
+                              "constants": {}, "kconfig": None}
+                continue
+            if cur is None:
+                continue
+            m = LOG_CONSTANTS.search(line)
+            if m:
+                for item in m.group(1).split():
+                    key, _, value = item.partition("=")
+                    cur["constants"][key] = value
+                continue
+            m = LOG_KCONFIG.search(line)
+            if m:
+                try:
+                    cur["kconfig"] = ast.literal_eval(m.group(1))
+                except (ValueError, SyntaxError):
+                    pass
+                cur = None
+    return last
+
+
+def board_firmware(settings, kstatus):
+    """What the board runs: from Klipper if it has talked to the board,
+    else from the newest klippy.log (or rotated log) that reports it."""
+    mcu = kstatus.objects.get("mcu", {}) if kstatus else {}
+    if mcu.get("mcu_version"):
+        return {"source": "klipper",
+                "version": mcu["mcu_version"],
+                "build_versions": mcu.get("mcu_build_versions"),
+                "constants": mcu.get("mcu_constants") or {},
+                "kconfig": mcu.get("mcu_kconfig")}
+    log = settings["KLIPPY_LOG"]
+    rotated = sorted(glob.glob(glob.escape(log) + ".*"),
+                     key=os.path.getmtime, reverse=True)
+    for path in [log] + rotated:
+        found = scan_log(path)
+        if found:
+            found["source"] = path
+            return found
+    return None
+
+
+######################################################################
+# Build bookkeeping
+######################################################################
+
+def build_paths(settings):
+    bdir = settings["BUILD_DIR"]
+    out = os.path.join(bdir, "out")
+    return {"dir": bdir, "out": out,
+            "kconfig": os.path.join(bdir, "kconfig"),
+            "bin": os.path.join(out, "klipper.bin"),
+            "dict": os.path.join(out, "klipper.dict"),
+            "record": os.path.join(bdir, "build.json"),
+            "lock": os.path.join(bdir, "lock")}
+
+
+class Lock:
+    """Keeps a build and a flash from running at the same time."""
+    def __init__(self, settings):
+        paths = build_paths(settings)
+        os.makedirs(paths["dir"], exist_ok=True)
+        self.f = open(paths["lock"], "w")
+        try:
+            fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.f.close()
+            raise Error("another build or flash is running")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.f.close()
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_build(settings):
+    """The last validated build, checked against the files on disk."""
+    paths = build_paths(settings)
+    try:
+        with open(paths["record"]) as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        raise Error("no validated build in %s; run build first" % paths["dir"])
+    for key in ("bin", "dict"):
+        if (not os.path.exists(paths[key])
+                or sha256(paths[key]) != record.get(key + "_sha256")):
+            raise Error("%s changed since it was validated; run build again"
+                        % paths[key])
+    return record
+
+
+def read_kconfig(path):
+    values = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            m = re.match(r"# (CONFIG_\w+) is not set$", line)
+            if m:
+                values[m.group(1)] = "n"
+            elif line.startswith("CONFIG_"):
+                key, _, value = line.partition("=")
+                values[key] = value
+    return values
+
+
+######################################################################
+# Commands
+######################################################################
+
+def collect_status(settings):
+    try:
+        kstatus = klippy_status(settings, {
+            "mcu": ["mcu_version"], "print_stats": ["state"],
+            "idle_timeout": ["state"]})
+        klippy_error = None
+    except Error as e:
+        kstatus, klippy_error = None, str(e)
+    host_version = git(settings, "describe", "--always", "--tags", "--long",
+                       "--dirty")
+    host_commit = git(settings, "rev-parse", "HEAD")
+    fw = board_firmware(settings, kstatus)
+    board = {"device": settings["DEVICE"],
+             "present": os.path.exists(settings["DEVICE"]),
+             "version": fw and fw["version"],
+             "source": fw and fw["source"],
+             "commit": None, "behind": None, "ahead": None}
+    board_commit = fw and commit_of(settings, fw["version"])
+    if board_commit and host_commit:
+        board["commit"] = board_commit
+        board["behind"] = count_commits(settings, board_commit + "..HEAD")
+        board["ahead"] = count_commits(settings, "HEAD.." + board_commit)
+    try:
+        service = subprocess.run(
+            ["systemctl", "is-active", settings["KLIPPER_SERVICE"]],
+            stdout=subprocess.PIPE, universal_newlines=True).stdout.strip()
+    except OSError:
+        service = None
+    klipper = {"service": service, "error": klippy_error,
+               "running": bool(kstatus and kstatus.running),
+               "state": None, "state_message": None,
+               "print_state": None, "idle_state": None}
+    if kstatus and kstatus.running:
+        klipper["state"] = kstatus.info.get("state")
+        klipper["state_message"] = kstatus.info.get("state_message")
+        klipper["print_state"] = kstatus.objects.get(
+            "print_stats", {}).get("state")
+        klipper["idle_state"] = kstatus.objects.get(
+            "idle_timeout", {}).get("state")
+    try:
+        build = load_build(settings)
+    except Error:
+        build = None
+    return {"settings": settings["_path"],
+            "host": {"version": host_version, "commit": host_commit},
+            "board": board, "klipper": klipper, "build": build}
+
+
+def cmd_status(settings, args):
+    st = collect_status(settings)
+    if args.json:
+        say(json.dumps(st, indent=2))
+        return
+    host, board, kl, build = st["host"], st["board"], st["klipper"], st["build"]
+    say("Host:     %s" % (host["version"] or "unknown (is KLIPPER_DIR a git checkout?)"))
+    if board["version"]:
+        where = ("reported by Klipper" if board["source"] == "klipper"
+                 else "from " + board["source"])
+        line = "Board:    %s (%s)" % (board["version"], where)
+        behind, ahead = board["behind"], board["ahead"]
+        if behind is None or ahead is None:
+            line += ", commit not found in the host's checkout"
+        elif behind and ahead:
+            line += ", %d behind and %d ahead of the host" % (behind, ahead)
+        elif behind:
+            line += ", %d commits behind the host" % behind
+        elif ahead:
+            line += ", %d commits ahead of the host" % ahead
+        else:
+            line += ", same commit as the host"
+        say(line)
+    else:
+        say("Board:    unknown (Klipper has not reported it and klippy.log has no record)")
+    say("Device:   %s %s" % ("present" if board["present"] else "absent",
+                             board["device"]))
+    if kl["error"]:
+        say("Klipper:  %s" % kl["error"])
+    elif kl["running"]:
+        line = "Klipper:  %s" % kl["state"]
+        if kl["state"] != "ready" and kl["state_message"]:
+            line += " (%s)" % kl["state_message"].strip().splitlines()[0]
+        say("%s, print %s" % (line, kl["print_state"] or "unknown"))
+    else:
+        say("Klipper:  not running (service %s)" % kl["service"])
+    if build:
+        say("Build:    %s, validated %s" % (build["version"], build["built"]))
+    else:
+        say("Build:    none")
+
+
+def cmd_build(settings, args):
+    paths = build_paths(settings)
+    kdir, kconfig = settings["KLIPPER_DIR"], settings["KCONFIG"]
+    if not os.path.exists(os.path.join(kdir, "Makefile")):
+        raise Error("%s does not look like a Klipper checkout" % kdir)
+    if not os.path.isfile(kconfig):
+        raise Error("KCONFIG %s does not exist" % kconfig)
+    with Lock(settings):
+        # A failed or rejected build must never be flashed.
+        if os.path.exists(paths["record"]):
+            os.remove(paths["record"])
+        shutil.rmtree(paths["out"], ignore_errors=True)
+        # olddefconfig rewrites its input, so it only ever sees a copy.
+        shutil.copyfile(kconfig, paths["kconfig"])
+        make = ["make", "-C", kdir, "KCONFIG_CONFIG=" + paths["kconfig"],
+                "OUT=" + paths["out"] + "/"]
+        say("Building from %s with %s" % (kdir, kconfig))
+        run(make + ["olddefconfig"])
+        report_kconfig_changes(read_kconfig(kconfig),
+                               read_kconfig(paths["kconfig"]))
+        run(make + ["-j%d" % (os.cpu_count() or 1)])
+        for key in ("bin", "dict"):
+            if not os.path.exists(paths[key]):
+                raise Error("the build did not produce %s" % paths[key])
+        with open(paths["dict"]) as f:
+            built = json.load(f)
+        say()
+        say("Built:    %s" % built.get("version"))
+        try:
+            kstatus = klippy_status(settings, {"mcu": None})
+        except Error as e:
+            say("note: %s; using klippy.log instead" % e)
+            kstatus = None
+        fw = board_firmware(settings, kstatus)
+        if fw:
+            say("Board:    %s (from %s)" % (
+                fw["version"],
+                "running firmware" if fw["source"] == "klipper" else fw["source"]))
+        validate(settings, paths, built, fw)
+        record = {"version": built.get("version"),
+                  "commit": git(settings, "rev-parse", "HEAD"),
+                  "kconfig": kconfig,
+                  "built": datetime.datetime.now().isoformat(timespec="seconds"),
+                  "bin_sha256": sha256(paths["bin"]),
+                  "dict_sha256": sha256(paths["dict"])}
+        with open(paths["record"] + ".tmp", "w") as f:
+            json.dump(record, f, indent=2)
+        os.replace(paths["record"] + ".tmp", paths["record"])
+        say("Build validated: %s" % paths["bin"])
+
+
+def run(cmd):
+    res = subprocess.run(cmd)
+    if res.returncode:
+        raise Error("%s failed with exit status %d"
+                    % (" ".join(cmd[:1] + cmd[-1:]), res.returncode))
+
+
+def report_kconfig_changes(before, after):
+    added = sorted(k for k in after if k not in before)
+    changed = sorted(k for k in after if k in before and after[k] != before[k])
+    removed = sorted(k for k in before if k not in after)
+    if added:
+        say("olddefconfig added %d options with their defaults" % len(added))
+    for key in changed:
+        say("warning: olddefconfig changed %s from %s to %s"
+            % (key, before[key], after[key]))
+    for key in removed:
+        say("note: olddefconfig dropped %s" % key)
+
+
+def validate(settings, paths, built, fw):
+    errors = []
+    constants = built.get("config", {})
+    addr = settings["FLASH_APPLICATION_ADDRESS"]
+    if addr:
+        got = read_kconfig(paths["kconfig"]).get(
+            "CONFIG_FLASH_APPLICATION_ADDRESS")
+        try:
+            ok = got is not None and int(got, 0) == int(addr, 0)
+        except ValueError:
+            ok = False
+        if not ok:
+            errors.append("the build starts at %s, FLASH_APPLICATION_ADDRESS "
+                          "says %s" % (got, addr))
+    if fw is None or not fw.get("constants"):
+        errors.append("nothing to check the build against: Klipper has not "
+                      "reported the board's firmware and klippy.log has no "
+                      "record of it")
+    else:
+        ref = fw["constants"]
+        keys = list(IDENTITY_CONSTANTS) + sorted(
+            k for k in set(ref) | set(constants)
+            if k.startswith(IDENTITY_PREFIXES))
+        for key in keys:
+            if str(constants.get(key)) != str(ref.get(key)):
+                errors.append("%s: the build has %s, the board has %s"
+                              % (key, constants.get(key), ref.get(key)))
+        if fw.get("kconfig") is not None and built.get("kconfig") != fw["kconfig"]:
+            say("warning: the build's config differs from the board's:")
+            old = set(fw["kconfig"].splitlines())
+            new = set(built.get("kconfig", "").splitlines())
+            for line in sorted(old - new):
+                say("  board only: %s" % line)
+            for line in sorted(new - old):
+                say("  build only: %s" % line)
+        board_commit = commit_of(settings, fw["version"])
+        if board_commit and board_commit == git(settings, "rev-parse", "HEAD"):
+            say("note: the board already runs this commit")
+    if errors:
+        for e in errors:
+            say("error: %s" % e)
+        raise Error("the build does not match the board; it will not be flashed")
+
+
+def flasher(settings):
+    python = os.path.join(settings["KLIPPY_ENV"], "bin", "python")
+    script = os.path.join(settings["KLIPPER_DIR"], "scripts", "spi_flash",
+                          "spi_flash.py")
+    for path in (python, script):
+        if not os.path.exists(path):
+            raise Error("%s does not exist" % path)
+    return [python, script]
+
+
+def check_board_name(settings):
+    res = subprocess.run(flasher(settings) + ["-l"], stdout=subprocess.PIPE,
+                         universal_newlines=True)
+    boards = res.stdout.split()
+    if res.returncode or settings["BOARD"].lower() not in boards:
+        raise Error("spi_flash.py does not know BOARD=%s (see spi_flash.py -l)"
+                    % settings["BOARD"])
+
+
+def cmd_preflight(settings, args):
+    build = load_build(settings)
+    if not os.path.exists(settings["DEVICE"]):
+        raise Error("the board is not connected (%s is missing). Is the "
+                    "printer switched on?" % settings["DEVICE"])
+    check_board_name(settings)
+    kstatus = klippy_status(settings, {"print_stats": ["state"],
+                                       "idle_timeout": ["state"]})
+    if kstatus.running:
+        print_state = kstatus.objects.get("print_stats", {}).get("state")
+        idle_state = kstatus.objects.get("idle_timeout", {}).get("state")
+        if print_state == "printing":
+            raise Error("a print is running; not flashing")
+        if print_state == "paused":
+            raise Error("a print is paused; not flashing")
+        if idle_state == "Printing":
+            raise Error("Klipper is busy running G-code; not flashing")
+        say("Klipper is up (state: %s) and not printing"
+            % kstatus.info.get("state"))
+    else:
+        say("Klipper is not running")
+    say("Ready to flash %s" % build["version"])
+
+
+def cmd_flash(settings, args):
+    paths = build_paths(settings)
+    with Lock(settings):
+        build = load_build(settings)
+        if klippy_status(settings, {}).running:
+            raise Error("Klipper is running and holds the board's serial "
+                        "port; stop it first")
+        if not os.path.exists(settings["DEVICE"]):
+            raise Error("the board is not connected (%s is missing)"
+                        % settings["DEVICE"])
+        cmd = (flasher(settings) + shlex.split(settings["FLASH_ARGS"])
+               + ["-d", paths["dict"], settings["DEVICE"], settings["BOARD"],
+                  paths["bin"]])
+        say("Flashing %s to %s" % (build["version"], settings["DEVICE"]))
+        res = subprocess.run(cmd)
+        if res.returncode:
+            raise Error("spi_flash.py failed with exit status %d"
+                        % res.returncode)
+        say("Flashed %s" % build["version"])
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("-c", "--config", metavar="FILE",
+                        help="settings file (default: $KLIPPER_MCU_FLASH_CONF"
+                             " or %s)" % DEFAULT_SETTINGS)
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    sub.required = True
+    p = sub.add_parser("status", help="show versions and state")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(func=cmd_status)
+    sub.add_parser("build", help="build and validate firmware").set_defaults(
+        func=cmd_build)
+    sub.add_parser("preflight", help="check that a flash can start now"
+                   ).set_defaults(func=cmd_preflight)
+    sub.add_parser("flash", help="flash the last validated build"
+                   ).set_defaults(func=cmd_flash)
+    args = parser.parse_args()
+    path = (args.config or os.environ.get("KLIPPER_MCU_FLASH_CONF")
+            or os.path.expanduser(DEFAULT_SETTINGS))
+    try:
+        args.func(load_settings(path), args)
+    except Error as e:
+        sys.stdout.flush()
+        print("error: %s" % e, file=sys.stderr, flush=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
