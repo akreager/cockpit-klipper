@@ -1,0 +1,2 @@
+# Session handoffs carry printer-specific details; never publish them.
+handoff.md
