@@ -6,12 +6,13 @@ to the printer's controller board. Klipper host updates still happen in
 Mainsail's Update Manager. Afterwards the tool brings the board to the same
 version safely, in one click.
 
-Status (2026-10-02): the worker `bin/klipper-mcu-flash` exists and passes
+Status (2026-10-03): the worker `bin/klipper-mcu-flash` exists and passes
 its tests on the dev machine (see "Working here"). On the printer host,
-`status` and `build` work, and the SKR 1.3 build validated against the
-board's logged firmware. `preflight` and `flash` have not run there, and no
-board has been flashed yet. The systemd unit and the Cockpit page are not
-written.
+`status`, `build` and `preflight` work: the SKR 1.3 build validated against
+the board, and `preflight` refuses with the printer off and passes with it
+on. The systemd unit is installed there, and the failure-path tests
+passed: printer off and print running (see "The unit"). No board has been
+flashed yet. The Cockpit page is not written.
 This file began as a handoff from a session in the private `printer-config`
 repo. Facts marked **(verified)** were checked against the printer or the
 upstream source on that date.
@@ -166,9 +167,9 @@ Keep the tool generic.
 README.md  LICENSE
 bin/klipper-mcu-flash                worker: status | build | preflight | flash   (written)
 examples/mcu-flash.conf              every setting, with defaults                  (written)
-systemd/klipper-mcu-flash.service    template, installed to /etc/systemd/system    (to do)
+systemd/cockpit-klipper-flash.service  unit template                              (written)
 cockpit/                             the page: manifest.json index.html mcu.js mcu.css (to do)
-install.sh                           optional one-time setup                       (to do)
+install.sh                           renders and installs the unit (uses sudo)     (written)
 ```
 
 ### Settings
@@ -180,27 +181,88 @@ error. The worker reads `-c FILE`, else `$KLIPPER_MCU_FLASH_CONF`, else
 lives in `printer-config` next to the board's kconfig
 (`firmware/skr13.config`); this repo ships only the example.
 
-### The unit (sketch)
+### The unit (`systemd/cockpit-klipper-flash.service`)
 
-```ini
-[Unit]
-Description=Build Klipper firmware and flash it to the printer board
+A `Type=oneshot` template. `install.sh` fills in the Klipper user, the
+worker's full path and Klipper's service name, then installs it as
+`/etc/systemd/system/cockpit-klipper-flash.service`.
 
-[Service]
-Type=oneshot
-User=<user>
-ExecStartPre=/path/to/klipper-mcu-flash build        # as the user, Klipper still running
-ExecStartPre=/path/to/klipper-mcu-flash preflight    # refuse if printing/paused or board absent
-ExecStartPre=+/usr/bin/systemctl stop klipper.service   # "+" = this line runs as root
-ExecStart=/path/to/klipper-mcu-flash flash
-ExecStopPost=+/usr/bin/systemctl start --no-block klipper.service   # see the first open point
-TimeoutStartSec=15min
-```
-
-- systemd's `%h` is root's home in system units even with `User=`, so the
-  install step writes full paths into the template.
-- `ExecStopPost=` also runs when an `ExecStartPre=` step fails, so Klipper
-  is always restarted. But see the first open point below.
+- **Steps:**
+  1. As root, delete a leftover restart marker.
+  2. As the user, `build` and then `preflight`, with Klipper still running.
+     A refusal ends the run with Klipper untouched.
+  3. As root, check Klipper's state:
+     - `active|activating|reloading|refreshing`: create
+       `/run/cockpit-klipper-flash.restart` and stop Klipper. The stop waits,
+       and it also cancels a pending auto-restart.
+     - `inactive|failed|maintenance`: Klipper stays stopped.
+     - Anything else, e.g. `deactivating` in the middle of a restart: the run
+       fails ("try again").
+  4. As the user, `flash`.
+  5. `ExecStopPost=` runs after success, failure and timeout alike:
+     - As root, if the marker exists, delete it and run `systemctl start
+       --no-block` on Klipper. So Klipper is started again only if this run
+       stopped it. A Moonraker power device with `bound_services: klipper`
+       keeps Klipper stopped while the plug is off, and a run must not undo
+       that.
+     - As the user, log `Run finished: $SERVICE_RESULT`.
+- **Why it's built this way:**
+  - **The name** must not start with `klipper` or `moonraker`. Moonraker's
+    `is_service_allowed()` (`moonraker/components/machine.py`) accepts any
+    service whose name starts with either, so Mainsail could start the run
+    with no confirmation.
+  - **The marker lives in `/run` itself, which only root can write.** A
+    `RuntimeDirectory=` would be owned by `User=`, so the Klipper user could
+    plant a symlink for root's `touch`.
+  - **`RefuseManualStop=yes`:** `stop` and `restart` are refused, whether
+    from Cockpit, the CLI or Moonraker over D-Bus, even when no run is
+    active. Always use `start`; it also works from the `failed` state.
+    `spi_flash.py` writes `firmware.bin` in place, so interrupting the
+    upload could leave a truncated file for the bootloader.
+    `systemctl kill` still works as the emergency abort, but never during
+    "Uploading Klipper Firmware to SD Card". Shutdown still stops the unit.
+  - **`SYSTEMD_LOG_TARGET=console`:** without it, `systemctl` in the `+`
+    lines logs its errors straight to the journal, without the unit's name,
+    so they are missing from `journalctl -u`. If the restart of Klipper
+    fails, the line says so and the run still logs `Run finished`.
+  - **`TimeoutStartSec=15min` applies to each step separately** (tested).
+    `spi_flash.py` limits its own waits to a few minutes.
+  - **Exec-line syntax:** a literal `$` is written `$$` in Exec lines.
+    `+` lines bypass `User=` but still get `Environment=`.
+  - **`PYTHONUNBUFFERED=1`** makes the flasher's progress appear in the
+    journal as it happens.
+  - **Settings overrides,** e.g. `Environment=KLIPPER_MCU_FLASH_CONF=`, go
+    in `systemctl edit`. `install.sh` overwrites the unit file.
+  - **systemd's `%h` is root's home** in system units even with `User=`, so
+    `install.sh` writes out full paths.
+- **`install.sh`:**
+  - It refuses to run as root.
+  - It accepts only plain characters in the path and names, because they
+    end up unquoted in Exec lines.
+  - It checks that Klipper's service exists and runs as the same user.
+  - It refuses while a run is in progress. A running oneshot is
+    `activating`, which `is-active` does not count as active, so it checks
+    `ActiveState`.
+  - It runs `daemon-reload` when systemd holds a stale copy.
+- **Tested 2026-10-03** in the user manager, against a fake Klipper and a
+  stub worker. Every path passed: success, a refusal at each step, a
+  failed flash, a timeout, a crash-looping Klipper, a stale marker, a
+  double start, and a refused stop.
+- **On the printer host, 2026-10-03:** installed with `install.sh`. With
+  the plug off, Moonraker had already stopped Klipper. `sudo systemctl
+  start` built and validated in under 3 s, then `preflight` refused ("the
+  board is not connected"). The run logged `Run finished: exit-code`, and
+  Klipper stayed stopped. A blocking `systemctl start` reports such a
+  refusal as "Job … failed because the control process exited with error
+  code".
+- **During a print, 2026-10-03:** the "print" was a one-line `G4 P60000`
+  file, with no heating and no motion. `preflight`, run by hand, refused
+  with "a print is running; not flashing". Klipper reported
+  `print_stats.state` `printing` and `idle_timeout.state` `Printing`. Once
+  the file had finished (`complete`), `preflight` passed again. It
+  ran by hand rather than through the unit so that a check that wrongly
+  passed could not lead to an unplanned flash. The printer-off run had
+  already shown how the unit handles a refusal at that step.
 
 ### The worker (`bin/klipper-mcu-flash`)
 
@@ -229,6 +291,8 @@ journal and the page.
     `FLASH_APPLICATION_ADDRESS` when that is set. With no record of the
     board at all, it refuses. A `kconfig` difference is only a warning, and
     so is "the board already runs this commit".
+  - Refuses if Klipper's `HEAD` changed during the build, e.g. because
+    Moonraker updated Klipper meanwhile.
   - On success it writes `BUILD_DIR/build.json` with the version, commit
     and SHA-256 of `klipper.bin` and `klipper.dict`.
 - **`preflight`** (called `check-idle` in the handoff):
@@ -236,7 +300,9 @@ journal and the page.
     print started during the build cannot be cut off.
   - Requires a validated build whose files still match their hashes, that
     `DEVICE` exists ("Is the printer switched on?"; it never powers
-    anything on), and that `spi_flash.py -l` knows `BOARD`.
+    anything on), and that `spi_flash.py -l` knows `BOARD`. If the flasher
+    itself fails, for example because the OS upgrade broke `KLIPPY_ENV`,
+    it reports that error rather than an unknown board.
   - Refuses on `print_stats.state` `printing`/`paused` or
     `idle_timeout.state` `Printing`. A missing socket or a refused
     connection means Klipper is not running, which is fine. A socket that
@@ -260,8 +326,9 @@ journal and the page.
   - `klipper-mcu-flash status --json` gives the versions, how far apart
     they are, whether the board is connected, Klipper state and print
     state, and the last build.
-  - Last run result:
-    `systemctl show klipper-mcu-flash -p Result -p ExecMainExitTimestamp`.
+  - Last run result: the last `Run finished: <result>` line in the unit's
+    journal. `systemctl show -p Result` won't do, because systemd unloads a
+    successful oneshot and forgets its result.
 - **Build only:** runs `klipper-mcu-flash build` directly as the logged-in
   user, with output streamed live. Klipper is not stopped.
 - **Build & flash:**
@@ -270,36 +337,29 @@ journal and the page.
     is absent the page says the printer looks switched off and leaves it at
     that: no power-on button through Moonraker (decided 2026-10-02).
   - After a confirmation, run
-    `systemctl start --no-block klipper-mcu-flash.service` with
+    `systemctl start --no-block cockpit-klipper-flash.service` with
     `superuser: "require"`.
-  - Stream `journalctl -f -o cat -u klipper-mcu-flash.service` and show the
-    result once the unit is inactive or failed.
-  - Warn not to restart Klipper from Mainsail or KlipperScreen while it
-    runs.
+  - Stream `journalctl -f -o cat -u cockpit-klipper-flash.service` and show
+    the result once the unit is inactive or failed. Then read
+    `status --json` again: `start --no-block` never reports whether Klipper
+    came back up.
+  - While a run is in progress, warn not to switch the printer, not to
+    update or restart Moonraker, and not to restart Klipper.
 - **Privileges:** starting the unit uses Cockpit's administrative access.
   Optional later: a polkit rule that lets the Klipper user start just this
   unit without admin mode.
 
-### One-time install on the printer host (sketch)
+### One-time install on the printer host
 
 ```sh
 git clone https://github.com/akreager/cockpit-klipper.git ~/cockpit-klipper
 cp ~/klipper/.config ~/printer_data/config/firmware/<board>.config   # commit it in printer-config
-ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu
-sudo install -m 644 <unit with paths filled in> /etc/systemd/system/klipper-mcu-flash.service
-sudo systemctl daemon-reload
+~/cockpit-klipper/install.sh            # as the Klipper user; -n previews, -k names Klipper's service
+ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu  # once the page exists
 ```
 
 ## Open design points
 
-- **Do not start Klipper if the unit did not stop it.** A Moonraker power
-  device with `bound_services: klipper` (the CR-10S has one) stops Klipper
-  whenever the printer's plug is off (seen 2026-10-02: plug off,
-  `klippy_state: disconnected`). A run started then fails in `preflight`,
-  yet the unconditional `ExecStopPost=` would start Klipper, which then
-  sits in an error state because the board is missing. Restart only when
-  the stop line actually stopped an active Klipper, e.g. by recording that
-  in a `RuntimeDirectory=` file. Both lines stay fixed in the unit file.
 - **Settings path for the unit and the page:** both can rely on the
   worker's default path. If the file lives elsewhere, the unit needs an
   `Environment=KLIPPER_MCU_FLASH_CONF=…` line, and the page must use the
@@ -316,7 +376,24 @@ sudo systemctl daemon-reload
   stays. Klipper is restarted and nothing changes.
 - **Klipper restarted from Mainsail or KlipperScreen mid-flash:** both
   processes want the port exclusively, so verification may fail. Re-run
-  it; the firmware is usually already written.
+  it; the firmware is usually already written. Masking Klipper during the
+  run would not prevent this: `systemctl mask --runtime` has no effect on a
+  unit file in `/etc/systemd/system`.
+- **Printer switched on outside Moonraker** (e.g. a smart plug's own
+  button): Moonraker notices only at its next status poll (`poll_interval`)
+  or status request. Then it starts its `bound_services`, possibly in the
+  middle of a run that found Klipper stopped, with the same effect as a
+  restart from Mainsail (`process_power_changed()` in
+  `moonraker/components/power.py`). Switch the printer on through
+  Moonraker, or wait until Klipper is up, before flashing.
+- **Stopping the run mid-upload:** refused (`RefuseManualStop=yes`).
+  `systemctl kill` remains possible, and during the upload it could leave a
+  truncated `firmware.bin`.
+- **Moonraker restarted or updated during a run:** a power device with
+  `initial_state: off` switches the printer off at every Moonraker start.
+  Mid-upload, that cuts the board's power.
+- **Printer switched off during a run:** the run had stopped Klipper, so
+  `ExecStopPost=` starts it again, and Klipper then waits for the board.
 - **Printer powered off:** the device is missing. Fail fast with a clear
   message before anything is stopped.
 - **During a print:** `preflight` refuses.
@@ -361,7 +438,7 @@ sudo systemctl daemon-reload
   2. Install the unit and test the failure paths first: printer powered off
      (must fail before Klipper is stopped, and must not start Klipper),
      then a print running (must refuse). Only then a real flash, with the
-     printer idle.
+     printer idle. Both tests passed on 2026-10-03.
   3. Build the page last and test it in Cockpit.
   4. After the first real flash, confirm the board's `mcu_version` equals
      the host version in klippy.log or Mainsail.

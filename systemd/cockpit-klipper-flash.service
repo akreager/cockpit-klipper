@@ -1,0 +1,59 @@
+# cockpit-klipper-flash.service: build Klipper's MCU firmware and flash it to
+# the printer's board.
+#
+# This is a template: install.sh fills in the Klipper user, the full path of
+# bin/klipper-mcu-flash and Klipper's service name, then installs the result
+# as /etc/systemd/system/cockpit-klipper-flash.service. Paths are written out
+# in full because %h would be root's home here, even with User=. install.sh
+# overwrites the installed file, so change settings such as Environment=
+# with "sudo systemctl edit cockpit-klipper-flash.service".
+#
+# The name must not start with "klipper" or "moonraker": Moonraker treats
+# such units as its own, and Mainsail could then start them.
+#
+# Start a run:  systemctl start --no-block cockpit-klipper-flash.service
+# Follow it:    journalctl -f -o cat -u cockpit-klipper-flash.service
+#
+# The unit refuses "stop" and "restart", even when idle, so always use
+# "start". Interrupting the SD-card upload could leave a truncated
+# firmware.bin for the bootloader to install. The emergency abort is
+# "systemctl kill cockpit-klipper-flash.service"; never use it while the log
+# says "Uploading Klipper Firmware to SD Card".
+#
+# Only the lines prefixed with "+" run as root, and they only stop and start
+# Klipper. Everything else runs as the Klipper user.
+
+[Unit]
+Description=Build Klipper firmware and flash it to the printer's board
+RefuseManualStop=yes
+
+[Service]
+Type=oneshot
+User=@USER@
+# The worker and the flasher are Python; show their output as it happens.
+Environment=PYTHONUNBUFFERED=1
+# Make systemctl write its errors to stderr: logged straight to the journal,
+# they would lack this unit's name and be missing from "journalctl -u".
+Environment=SYSTEMD_LOG_TARGET=console
+# The settings file, if it is not at the worker's default path:
+#Environment=KLIPPER_MCU_FLASH_CONF=/path/to/mcu-flash.conf
+# The limit applies to each step separately: build, preflight, stop, flash.
+TimeoutStartSec=15min
+
+# Forget a restart note left over from an earlier run.
+ExecStartPre=+/usr/bin/rm -f /run/cockpit-klipper-flash.restart
+# Build and check while Klipper keeps running. A rejected build or a busy or
+# switched-off printer ends the run here, with Klipper untouched.
+ExecStartPre=@WORKER@ build
+ExecStartPre=@WORKER@ preflight
+# Stop Klipper if it is running or starting, and note that this run did it.
+# The note lives in /run itself, which only root can write. If Klipper is in
+# any other state, e.g. just stopping or restarting, the run ends: try again.
+ExecStartPre=+/bin/sh -c 'state=$$(/usr/bin/systemctl is-active @KLIPPER_SERVICE@); case $$state in active|activating|reloading|refreshing) echo "Stopping @KLIPPER_SERVICE@"; /usr/bin/touch /run/cockpit-klipper-flash.restart && /usr/bin/systemctl stop @KLIPPER_SERVICE@ ;; inactive|failed|maintenance) echo "@KLIPPER_SERVICE@ is $$state; it stays stopped" ;; *) echo "error: @KLIPPER_SERVICE@ is $${state:-in an unknown state}; not flashing, try again" >&2; exit 1 ;; esac'
+ExecStart=@WORKER@ flash
+# Runs after success, failure and timeout alike. Start Klipper again only if
+# this run stopped it: while the printer is switched off, Moonraker keeps
+# Klipper stopped on purpose.
+ExecStopPost=+/bin/sh -c 'if [ -e /run/cockpit-klipper-flash.restart ]; then /usr/bin/rm -f /run/cockpit-klipper-flash.restart; echo "Starting @KLIPPER_SERVICE@ again"; /usr/bin/systemctl start --no-block @KLIPPER_SERVICE@ || echo "error: could not start @KLIPPER_SERVICE@; start it by hand" >&2; fi'
+# For the page: systemd forgets the result of a successful oneshot run.
+ExecStopPost=/bin/sh -c 'echo "Run finished: $$SERVICE_RESULT"'

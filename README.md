@@ -4,9 +4,9 @@ Build Klipper's MCU firmware from the Klipper source on your printer host and
 flash it to the printer's controller board, from a
 [Cockpit](https://cockpit-project.org/) page.
 
-> **Status:** work in progress. The command-line worker exists but has not
-> flashed a board yet; the systemd service and the Cockpit page are still to
-> come.
+> **Status:** work in progress. The command-line worker and the systemd
+> service exist but have not flashed a board yet; the Cockpit page is still
+> to come.
 
 ## Why
 
@@ -44,6 +44,23 @@ flashed with Klipper's own SD-card flasher (`scripts/spi_flash/`, which
 `flash-sdcard.sh` runs). Other boards that
 `flash-sdcard.sh` supports should work with their own Klipper config. Boards
 that need another flash method (DFU, Katapult) are not covered yet.
+
+## Install (so far)
+
+On the printer host, as the user Klipper runs as:
+
+```sh
+git clone https://github.com/akreager/cockpit-klipper.git ~/cockpit-klipper
+mkdir -p ~/printer_data/config/firmware
+cp ~/klipper/.config ~/printer_data/config/firmware/my-board.config   # your board's menuconfig
+cp ~/cockpit-klipper/examples/mcu-flash.conf ~/printer_data/config/firmware/   # then edit it
+~/cockpit-klipper/install.sh      # installs cockpit-klipper-flash.service; asks for sudo
+```
+
+Then `~/cockpit-klipper/bin/klipper-mcu-flash status` shows where things
+stand, and `systemctl start --no-block cockpit-klipper-flash.service` runs a
+build and flash. Follow it with
+`journalctl -f -o cat -u cockpit-klipper-flash.service`.
 
 ## Requirements
 
