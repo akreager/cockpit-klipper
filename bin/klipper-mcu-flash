@@ -574,7 +574,7 @@ LOG_RECORD = re.compile(r"(DEBUG|INFO|WARNING|ERROR|CRITICAL):[^:]*:(.*)$")
 def last_exception(lines):
     """The exception at the end of a printed traceback: the one a handler
     caught, after any it was raised while handling. Its message may span
-    lines."""
+    lines: often a first line, then a note wrapped at about 60 columns."""
     starts = [i for i, l in enumerate(lines) if l.startswith("Traceback ")]
     found = []
     for line in lines[starts[-1] + 1:] if starts else ():
@@ -582,7 +582,9 @@ def last_exception(lines):
             continue
         if not line:
             break
-        found.append(line)
+        found.append(line.strip())
+    if len(found) > 2:
+        found[1:] = [" ".join(found[1:])]
     return "; ".join(found)
 
 

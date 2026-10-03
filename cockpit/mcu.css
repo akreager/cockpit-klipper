@@ -85,24 +85,54 @@
     --info-line: #4394e5;
 }
 
-html, body {
-    margin: 0;
+html {
     background: var(--bg);
+}
+
+body {
+    margin: 0;
     color: var(--text);
     font-family: RedHatText, "Red Hat Text", "Helvetica Neue", Arial, sans-serif;
     font-size: 0.875rem;
     line-height: 1.5;
 }
 
-.page {
-    max-width: 64rem;
-    padding: 1.5rem;
+/* One column; side by side when there is room, with the output card no
+ * taller than the window, so the log scrolls rather than the page. */
+.page, .side {
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
 }
 
+.page {
+    max-width: 64rem;
+    padding: 1.5rem;
+}
+
+@media (min-width: 75rem) {
+    .page {
+        display: grid;
+        grid-template-columns: minmax(28rem, 36rem) minmax(0, 1fr);
+        align-items: start;
+        max-width: 140rem;
+    }
+
+    .output {
+        display: flex;
+        flex-direction: column;
+        max-height: calc(100vh - 3rem);
+    }
+
+    .output .log {
+        flex: 0 1 auto;
+        min-height: 0;
+        max-height: none;
+    }
+}
+
 .card {
+    box-sizing: border-box;
     background: var(--card);
     border-radius: 1rem;
     padding: 1.5rem;
@@ -220,10 +250,10 @@ button:focus-visible {
     padding: 0.75rem 1rem;
     border-left: 3px solid;
     border-radius: 0.25rem;
-    white-space: pre-wrap;
 }
 
-.alert.danger { background: var(--err-bg); color: var(--err-text); border-color: var(--err-line); }
+/* Error alerts hold command output, which may have line breaks. */
+.alert.danger { background: var(--err-bg); color: var(--err-text); border-color: var(--err-line); white-space: pre-wrap; }
 .alert.warning { background: var(--warn-bg); color: var(--warn-text); border-color: var(--warn-line); }
 .card .alert { margin-bottom: 1rem; }
 
@@ -244,7 +274,7 @@ button:focus-visible {
 
 .log {
     margin: 0;
-    max-height: 32rem;
+    max-height: min(32rem, 60vh);
     overflow: auto;
     padding: 0.75rem 1rem;
     background: var(--log-bg);

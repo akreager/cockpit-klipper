@@ -449,6 +449,9 @@ ships only inside its own pages' bundles. It is installed by symlinking
     3 s, the page shows the run as "Ended".
   - Reading the system journal needs the `adm` or `systemd-journal`
     group. Allen is in `adm`.
+- **Layout:** one column. From 75rem (1200 px) wide, the status card and
+  the output card sit side by side, and the output card is no taller than
+  the window, so its log scrolls rather than the page.
 - **Build only:** runs `build` as the logged-in user and streams its
   output. Klipper is not stopped. Closing the page kills the build, which
   is harmless: `build` deletes the previous record first.
