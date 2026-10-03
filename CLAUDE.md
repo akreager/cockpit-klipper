@@ -7,8 +7,11 @@ Mainsail's Update Manager. Afterwards the tool brings the board to the same
 version safely, in one click.
 
 Status (2026-10-02): the worker `bin/klipper-mcu-flash` exists and passes
-its tests on the dev machine (see "Working here"). It has not run on the
-printer host yet. The systemd unit and the Cockpit page are not written.
+its tests on the dev machine (see "Working here"). On the printer host,
+`status` and `build` work, and the SKR 1.3 build validated against the
+board's logged firmware. `preflight` and `flash` have not run there, and no
+board has been flashed yet. The systemd unit and the Cockpit page are not
+written.
 This file began as a handoff from a session in the private `printer-config`
 repo. Facts marked **(verified)** were checked against the printer or the
 upstream source on that date.
@@ -83,6 +86,10 @@ Keep the tool generic.
     command-line values override both. An absolute `OUT` works (verified by
     building the SKR 1.3 config), so builds never touch `~/klipper/out`.
   - `make clean` is just `rm -rf $(OUT)`.
+  - arm-none-eabi-gcc 14 prints two `-Warray-bounds` warnings for
+    `src/generic/armcm_reset.c` (verified 2026-10-02). They are harmless:
+    the code deliberately reads the bootloader's vector table at address 0,
+    and Klipper builds with `-fno-delete-null-pointer-checks`.
   - When Klipper's Kconfig sources are newer, `olddefconfig` **rewrites the
     config file in place**. Always build from a temporary copy. Rewriting
     the copy tracked in `printer-config` would leave that repo dirty on the
@@ -107,11 +114,18 @@ Keep the tool generic.
     `MCU 'mcu' config: K=V …`, then `MCU 'mcu' kconfig: <repr>`. Rotated
     `klippy.log.YYYY-MM-DD` files repeat them in their header.
   - Compare the build with the board **before** stopping Klipper.
-- **Versions:** compare commits (`-g<hash>`), never version strings. Both
-  Klipper and `buildcommands.py` use `git describe --always --tags --long
-  --dirty`. When that says dirty, the firmware version also gets
-  `-<build time>-<hostname>` appended. Hash abbreviations differ in length
-  (Moonraker `g2d7717e3`, Klipper `g2d7717e3b`).
+- **Versions:** compare commits (`-g<hash>`), never version strings.
+  - Both Klipper and `buildcommands.py` use `git describe --always --tags
+    --long --dirty`. When that says dirty, the firmware version also gets
+    `-<build time>-<hostname>` appended.
+  - Klipper's host version also gets `-dirty` when `klippy/extras/` or
+    `klippy/kinematics/` holds untracked or ignored `.py` files or symlinks,
+    e.g. third-party extras, even though `git describe` reports the checkout
+    as clean (`klippy/klippy.py`; verified 2026-10-02). `buildcommands.py`
+    has no such rule, so firmware built from the same checkout is not marked
+    dirty.
+  - Hash abbreviations differ in length (Moonraker `g2d7717e3`, Klipper
+    `g2d7717e3b`).
 - **Klipper API socket:** JSON messages terminated by `0x03`
   (`docs/API_Server.md`). For example:
   `{"id":1,"method":"objects/query","params":{"objects":{"print_stats":["state"],"mcu":["mcu_version"]}}}`.
@@ -190,9 +204,11 @@ TimeoutStartSec=15min
 
 ### The worker (`bin/klipper-mcu-flash`)
 
-Python 3, standard library only (it needs JSON and a unix-socket client;
-the host runs Python 3.12). Exit status 1 with `error: …` on stderr for
-any refusal. All output is line-buffered for the journal and the page.
+Python 3, standard library only (it needs JSON and a unix-socket client).
+The printer host runs Python 3.14 since its upgrade to Ubuntu 26.04 on
+2026-10-02, and the worker runs there unchanged. Exit status 1 with
+`error: …` on stderr for any refusal. All output is line-buffered for the
+journal and the page.
 
 - **The board's firmware** comes from Klipper's `mcu` object when Klipper
   has talked to the board, else from the newest klippy.log (current, then
