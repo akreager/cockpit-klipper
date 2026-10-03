@@ -173,7 +173,9 @@ def git(settings, *args):
 def commit_of(settings, version):
     # Firmware versions look like v0.13.0-745-gf0892d82b, optionally followed
     # by -dirty-<build time>-<host> when built from a modified checkout.
-    m = re.search(r"-g([0-9a-f]{7,40})(?![0-9a-f])", version or "")
+    # Without reachable tags, git describe --always gives just the hash.
+    m = (re.search(r"-g([0-9a-f]{7,40})(?![0-9a-f])", version or "")
+         or re.match(r"([0-9a-f]{7,40})(?![0-9a-f])", version or ""))
     if not m:
         return None
     return git(settings, "rev-parse", "--verify", "--quiet",
@@ -428,6 +430,7 @@ def cmd_build(settings, args):
         shutil.copyfile(kconfig, paths["kconfig"])
         make = ["make", "-C", kdir, "KCONFIG_CONFIG=" + paths["kconfig"],
                 "OUT=" + paths["out"] + "/"]
+        head = git(settings, "rev-parse", "HEAD")
         say("Building from %s with %s" % (kdir, kconfig))
         run(make + ["olddefconfig"])
         report_kconfig_changes(read_kconfig(kconfig),
@@ -440,6 +443,11 @@ def cmd_build(settings, args):
             built = json.load(f)
         say()
         say("Built:    %s" % built.get("version"))
+        # E.g. Moonraker updating Klipper mid-build would mix sources.
+        if head and (git(settings, "rev-parse", "HEAD") != head
+                     or commit_of(settings, built.get("version")) != head):
+            raise Error("Klipper's checkout changed during the build "
+                        "(an update?); build again")
         try:
             kstatus = klippy_status(settings, {"mcu": None})
         except Error as e:
@@ -452,7 +460,7 @@ def cmd_build(settings, args):
                 "running firmware" if fw["source"] == "klipper" else fw["source"]))
         validate(settings, paths, built, fw)
         record = {"version": built.get("version"),
-                  "commit": git(settings, "rev-parse", "HEAD"),
+                  "commit": head,
                   "kconfig": kconfig,
                   "built": datetime.datetime.now().isoformat(timespec="seconds"),
                   "bin_sha256": sha256(paths["bin"]),
@@ -463,11 +471,23 @@ def cmd_build(settings, args):
         say("Build validated: %s" % paths["bin"])
 
 
+def call(cmd, **kwargs):
+    try:
+        return subprocess.run(cmd, **kwargs)
+    except OSError as e:
+        raise Error("cannot run %s: %s" % (cmd[0], e.strerror))
+
+
+def failure(what, returncode):
+    if returncode < 0:
+        return "%s was killed by signal %d" % (what, -returncode)
+    return "%s failed with exit status %d" % (what, returncode)
+
+
 def run(cmd):
-    res = subprocess.run(cmd)
+    res = call(cmd)
     if res.returncode:
-        raise Error("%s failed with exit status %d"
-                    % (" ".join(cmd[:1] + cmd[-1:]), res.returncode))
+        raise Error(failure(" ".join(cmd[:1] + cmd[-1:]), res.returncode))
 
 
 def report_kconfig_changes(before, after):
@@ -538,10 +558,16 @@ def flasher(settings):
 
 
 def check_board_name(settings):
-    res = subprocess.run(flasher(settings) + ["-l"], stdout=subprocess.PIPE,
-                         universal_newlines=True)
-    boards = res.stdout.split()
-    if res.returncode or settings["BOARD"].lower() not in boards:
+    res = call(flasher(settings) + ["-l"], stdout=subprocess.PIPE,
+               stderr=subprocess.PIPE, universal_newlines=True)
+    if res.returncode:
+        # E.g. a KLIPPY_ENV broken by an OS upgrade: show why, not "unknown",
+        # and keep the whole traceback in the journal.
+        sys.stderr.write(res.stderr)
+        lines = res.stderr.strip().splitlines()
+        raise Error(failure("spi_flash.py -l", res.returncode)
+                    + (": " + lines[-1] if lines else ""))
+    if settings["BOARD"].lower() not in res.stdout.split():
         raise Error("spi_flash.py does not know BOARD=%s (see spi_flash.py -l)"
                     % settings["BOARD"])
 
@@ -584,10 +610,9 @@ def cmd_flash(settings, args):
                + ["-d", paths["dict"], settings["DEVICE"], settings["BOARD"],
                   paths["bin"]])
         say("Flashing %s to %s" % (build["version"], settings["DEVICE"]))
-        res = subprocess.run(cmd)
+        res = call(cmd)
         if res.returncode:
-            raise Error("spi_flash.py failed with exit status %d"
-                        % res.returncode)
+            raise Error(failure("spi_flash.py", res.returncode))
         say("Flashed %s" % build["version"])
 
 
