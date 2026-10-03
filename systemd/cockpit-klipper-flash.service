@@ -55,5 +55,9 @@ ExecStart=@WORKER@ flash
 # this run stopped it: while the printer is switched off, Moonraker keeps
 # Klipper stopped on purpose.
 ExecStopPost=+/bin/sh -c 'if [ -e /run/cockpit-klipper-flash.restart ]; then /usr/bin/rm -f /run/cockpit-klipper-flash.restart; echo "Starting @KLIPPER_SERVICE@ again"; /usr/bin/systemctl start --no-block @KLIPPER_SERVICE@ || echo "error: could not start @KLIPPER_SERVICE@; start it by hand" >&2; fi'
+# If this run got as far as flashing, wait up to a minute for Klipper and
+# show what the board runs now. "-": a failed ExecStopPost line would skip
+# the ones after it.
+ExecStopPost=-@WORKER@ report
 # For the page: systemd forgets the result of a successful oneshot run.
 ExecStopPost=/bin/sh -c 'echo "Run finished: $$SERVICE_RESULT"'

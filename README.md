@@ -65,7 +65,9 @@ t=$(date '+%F %T'); sudo systemctl start --no-block cockpit-klipper-flash.servic
     journalctl -f -o cat -u cockpit-klipper-flash.service --since "$t" | sed '/^Run finished:/q'
 ```
 
-The last line says how the run ended, e.g. `Run finished: success`.
+After a flash the run waits for Klipper to come back and says which
+firmware the board runs now. The last line says how the run ended, e.g.
+`Run finished: success`.
 
 ## Requirements
 
@@ -78,8 +80,10 @@ The last line says how the run ended, e.g. `Run finished: success`.
 ## Troubleshooting
 
 **"Failed to Initialize SD Card. Is it inserted?"** Klipper's flasher only
-says why when it runs verbosely. Stop Klipper and run a check, which
-starts the card up the same way but does not upload anything:
+says why in its debug log. The run prints the errors from that log, and the
+whole log is in `~/.cache/klipper-mcu-flash/flash.log`. To try a card
+without flashing, stop Klipper and run a check. It starts the card up the
+same way but does not upload anything:
 
 ```sh
 sudo systemctl stop klipper

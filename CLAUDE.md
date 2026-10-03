@@ -85,9 +85,11 @@ Keep the tool generic.
   2026-10-03). FatFS's initialise callback (`_fatfs_cb_initialize`)
   catches every exception and logs it only at debug level. Without `-v`,
   every card problem reads "Failed to Initialize SD Card. Is it
-  inserted?" (`FR_NOT_READY`). To see the failing step, stop Klipper and
-  run `spi_flash.py -c -v <device> <board> <klipper.bin>` by hand. `-c`
-  goes through the same reset and card start-up but only reads the card.
+  inserted?" (`FR_NOT_READY`). The worker therefore always passes `-v`
+  and prints the logged errors when a flash fails (see "The worker"). To
+  test a card without flashing, stop Klipper and run `spi_flash.py -c -v
+  <device> <board> <klipper.bin>` by hand. `-c` goes through the same
+  reset and card start-up but does not upload.
   - The CR-10S's card answered CMD0 and CMD8, then never finished ACMD41
     ("SD Card did not come out of IDLE after reset"). `_check_command`
     tries 15 times, 0.1 s apart. That is a fault of the card itself,
@@ -179,7 +181,7 @@ Keep the tool generic.
 
 ```
 README.md  LICENSE
-bin/klipper-mcu-flash                worker: status | build | preflight | flash   (written)
+bin/klipper-mcu-flash                worker: status | build | preflight | flash | report (written)
 examples/mcu-flash.conf              every setting, with defaults                  (written)
 systemd/cockpit-klipper-flash.service  unit template                              (written)
 cockpit/                             the page: manifest.json index.html mcu.js mcu.css (to do)
@@ -219,6 +221,9 @@ worker's full path and Klipper's service name, then installs it as
        stopped it. A Moonraker power device with `bound_services: klipper`
        keeps Klipper stopped while the plug is off, and a run must not undo
        that.
+     - As the user, `report` (see "The worker"), prefixed `-`: a failing
+       `ExecStopPost=` line makes systemd skip the lines after it (tested
+       2026-10-03), and the next line must always run.
      - As the user, log `Run finished: $SERVICE_RESULT`.
 - **Why it's built this way:**
   - **The name** must not start with `klipper` or `moonraker`. Moonraker's
@@ -338,18 +343,41 @@ journal and the page.
   - This check must live in the worker, not only in the page, because the
     unit can also be started from Cockpit's *Services* page or the CLI.
 - **`flash`:** re-checks the build's hashes, refuses while Klipper answers on
-  its socket, then runs `spi_flash.py [FLASH_ARGS] -d klipper.dict DEVICE
+  its socket, then runs `spi_flash.py -v [FLASH_ARGS] -d klipper.dict DEVICE
   BOARD klipper.bin` and exits non-zero on failure.
+  - The flasher's progress (stdout) goes to the journal. Its `-v` debug log
+    (stderr) goes to `BUILD_DIR/flash.log`, which also keeps the journal
+    free of its noise.
+  - On failure it prints each `ERROR` record of that log with the last
+    line of its traceback, e.g. `error: flash_sdcard: error initializing
+    sdcard (OSError: flash_sdcard: SD Card did not come out of IDLE after
+    reset)`. Output before the first record, e.g. a crash on import,
+    counts as an error too.
+  - Before the upload it writes `BUILD_DIR/flash.json` (version, commit,
+    start time, systemd's `$INVOCATION_ID`), and adds the result after.
+- **`report [--timeout 60]`:** runs from `ExecStopPost=` after Klipper has
+  been started again.
+  - In the unit it does nothing unless `flash.json` carries this run's
+    `$INVOCATION_ID`, so refusals stay quiet. systemd gives ExecStart and
+    ExecStopPost lines the same ID (tested 2026-10-03). By hand it reports
+    on the last flash.
+  - It waits until Klipper's state is no longer `startup`, then prints the
+    state and the board's `mcu_version`, and says whether that is the
+    flashed build's commit.
+  - It gives up if Klipper's service is not running after 3 s (the start
+    the unit queued with `--no-block` needs a moment), or after the
+    timeout. The timeout stays below systemd's default 90 s stop timeout.
+  - Exit status 1 if Klipper is not ready, or the board does not run the
+    build after a flash that succeeded.
 - `build` and `flash` hold an flock on `BUILD_DIR/lock`, so they cannot
   overlap.
-- **Not done (optional later):**
-  - Wait for Klipper to report ready, read `mcu_version` and print the
-    result.
-  - Send a `RESPOND` through the API socket's `gcode/script` so Mainsail
-    and KlipperScreen show what happened.
-  - Show why the SD card failed to initialise. One way: run the flasher
-    with `-v` and keep its debug log (stderr) out of the journal, in
-    `BUILD_DIR`. After a failure, print its `flash_sdcard:` errors.
+- **Not done (optional later):** send a `RESPOND` through the API
+  socket's `gcode/script` so Mainsail and KlipperScreen show what happened.
+- **`flash -v` and `report` (2026-10-03)** were tested in a scratch
+  `BUILD_DIR` with a stand-in flasher: a card failure, a crash on import,
+  success, and `report` against the real Klipper (read-only), a run that
+  did not flash, a missing service and a timeout. They are not yet in the
+  installed unit, and no real flash has run them.
 
 ### The page
 
@@ -371,9 +399,9 @@ journal and the page.
     `systemctl start --no-block cockpit-klipper-flash.service` with
     `superuser: "require"`.
   - Stream `journalctl -f -o cat -u cockpit-klipper-flash.service` and show
-    the result once the unit is inactive or failed. Then read
-    `status --json` again: `start --no-block` never reports whether Klipper
-    came back up.
+    the result once the unit is inactive or failed. The run's `report`
+    lines say whether Klipper came back and what the board runs; then read
+    `status --json` again.
   - While a run is in progress, warn not to switch the printer, not to
     update or restart Moonraker, and not to restart Klipper.
 - **Privileges:** starting the unit uses Cockpit's administrative access.
