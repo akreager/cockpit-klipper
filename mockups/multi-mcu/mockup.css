@@ -1,0 +1,316 @@
+/* Additions to ../../cockpit/mcu.css for the multi-MCU mockups. Only its
+ * variables are used, so either option can move into the real page. */
+
+/* The mockup's own controls; not part of either design. */
+.mock-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    padding: 0.5rem 1.5rem;
+    background: var(--info-bg);
+    color: var(--info-text);
+    border-bottom: 2px dashed var(--info-line);
+}
+
+.mock-bar a { color: inherit; }
+.mock-bar a[aria-current] { font-weight: 700; text-decoration: none; }
+.mock-bar select { font: inherit; max-width: 100%; }
+.mock-bar label { display: inline-flex; gap: 0.375rem; align-items: center; flex-wrap: wrap; }
+.mock-bar button.secondary, .mock-bar button.link { color: var(--info-text); border-color: var(--info-line); }
+
+/* Shared bits */
+
+.mono {
+    font-family: RedHatMono, "Red Hat Mono", "Liberation Mono", monospace;
+    font-size: 0.8125rem;
+    overflow-wrap: anywhere;
+}
+
+.ok-text, td.ok, .report-klipper.ok, .report-head.ok { color: var(--ok-line); }
+.warn-text { color: var(--warn-text); }
+td.err, .report-klipper.err, .report-head.failed { color: var(--err-text); }
+.report-head, .report-klipper { font-weight: 500; }
+
+h3 {
+    margin: 1rem 0 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.badge.idle { border: 1px solid var(--border); color: var(--muted); }
+.badge { white-space: nowrap; }
+
+.tag {
+    border: 1px solid var(--info-line);
+    color: var(--info-text);
+    background: var(--info-bg);
+    border-radius: 0.25rem;
+    padding: 0 0.375rem;
+    font-size: 0.75rem;
+}
+
+/* The order number: a filled circle. */
+.order, .legend-order {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 50%;
+    background: var(--primary);
+    color: var(--on-primary);
+    font-weight: 700;
+    font-size: 0.8125rem;
+}
+
+.confirm-order, .confirm-warn { margin: 0 0 1rem; padding-left: 1.25rem; }
+.confirm-order li, .confirm-warn li { margin-bottom: 0.25rem; }
+
+.table-wrap { overflow-x: auto; margin: 0.5rem 0; }
+
+table.report {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.8125rem;
+}
+
+.report th, .report td {
+    text-align: left;
+    padding: 0.375rem 0.75rem 0.375rem 0;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+.report thead th { color: var(--muted); font-weight: 500; }
+
+/* Option A: the tree */
+
+.sub-head { margin: 0 0 0.5rem; font-size: 1rem; }
+
+.tree, .tree ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+/* Each level indents and hangs off a vertical line. */
+.tree ul {
+    margin-left: 0.75rem;
+    padding-left: 0.75rem;
+    border-left: 1px solid var(--border);
+}
+
+.tree li li { position: relative; }
+
+.tree li li::before {
+    content: "";
+    position: absolute;
+    left: -0.75rem;
+    top: 1.25rem;
+    width: 0.625rem;
+    border-top: 1px solid var(--border);
+}
+
+.row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.5rem 0.625rem;
+    margin: 0.25rem 0;
+    border-radius: 0.5rem;
+}
+
+.host-row, .bus-row { align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.bus-row { padding-block: 0.25rem; }
+.bus-name { font-weight: 500; color: var(--info-text); }
+
+.mcu-row {
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--ok-line);
+}
+
+.mcu-row.blocking { border-left-color: var(--err-line); }
+.mcu-row.absent { border-style: dashed; border-left-style: solid; border-left-color: var(--border); }
+.mcu-row.absent.blocking { border-left-color: var(--err-line); }
+.mcu-row input { margin-top: 0.25rem; }
+
+.row-main { flex: 1 1 auto; min-width: 0; }
+.row-title { display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; align-items: baseline; }
+.row-facts { display: flex; flex-wrap: wrap; gap: 0 1rem; }
+.row-dev { color: var(--muted); }
+
+.row-side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.375rem;
+}
+
+.dot::before {
+    content: "\25CF\00a0";
+}
+
+.dot.ok::before { color: var(--ok-line); }
+.dot.err::before { color: var(--err-line); }
+
+.order-box {
+    margin: 0.5rem 0 1.25rem;
+}
+
+.order-box h3 { margin-top: 0.75rem; }
+.order-list { margin: 0; padding-left: 1.25rem; }
+.order-list li { margin-bottom: 0.25rem; }
+
+.steps {
+    list-style: none;
+    margin: 0.75rem 0;
+    padding: 0;
+}
+
+.step {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.375rem 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.step.skipped > span:first-child { color: var(--muted); text-decoration: line-through; }
+.output #report { margin-bottom: 1rem; }
+
+@media (max-width: 30rem) {
+    .page, .page-b { padding: 1rem; }
+    .card { padding: 1rem; }
+    .mcu-row { flex-wrap: wrap; }
+    .row-side { flex-direction: row; align-items: center; margin-left: 1.75rem; }
+}
+
+/* Option B: diagram, detail panel and plan */
+
+.page-b {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    max-width: 64rem;
+    padding: 1.5rem;
+}
+
+@media (min-width: 75rem) {
+    .page-b {
+        display: grid;
+        grid-template-columns: minmax(0, 1.3fr) minmax(26rem, 1fr);
+        align-items: start;
+        max-width: 140rem;
+    }
+
+    .diagram-card, .detail-card { grid-column: 1; }
+    .plan-card { grid-column: 2; grid-row: 1 / span 2; }
+}
+
+.diagram-wrap {
+    overflow-x: auto;
+    text-align: center;
+}
+
+#diagram {
+    max-width: 100%;
+    height: auto;
+}
+
+.dg-host rect {
+    fill: var(--info-bg);
+    stroke: var(--info-line);
+    stroke-width: 1.5;
+}
+
+.dg-box { cursor: pointer; outline: none; }
+
+.dg-box rect.bg {
+    fill: var(--log-bg);
+    stroke: var(--border);
+    stroke-width: 1.5;
+}
+
+.dg-box:hover rect.bg { stroke: var(--primary); }
+.dg-box.focused rect.bg { stroke: var(--primary); stroke-width: 3; }
+.dg-box:focus-visible rect.bg { stroke: var(--primary); stroke-width: 3; stroke-dasharray: 4 3; }
+.dg-box.absent rect.bg { stroke-dasharray: 6 4; }
+.dg-box.offline { opacity: 0.55; }
+
+.stripe { fill: var(--border); }
+.dg-box.ok .stripe { fill: var(--ok-line); }
+.dg-box.err .stripe { fill: var(--err-line); }
+.dg-box.run .stripe { fill: var(--info-line); }
+
+.t-name { fill: var(--text); font-weight: 700; font-size: 13px; }
+.t-sub { fill: var(--muted); font-size: 12px; }
+.t-stat { fill: var(--muted); font-size: 12px; font-weight: 500; }
+.dg-box.ok .t-stat { fill: var(--ok-line); }
+.dg-box.err .t-stat { fill: var(--err-text); }
+.dg-box.run .t-stat { fill: var(--info-text); }
+
+.dg-order circle { fill: var(--primary); }
+.dg-order text { fill: var(--on-primary); font-weight: 700; font-size: 12px; }
+
+.dg-bus { stroke: var(--muted); stroke-width: 2; }
+.dg-bus.can { stroke: var(--info-line); stroke-width: 4; }
+.dg-bus.down { stroke: var(--err-line); stroke-dasharray: 6 5; }
+.dg-bus-label { fill: var(--muted); font-size: 11px; font-weight: 500; }
+.dg-bus-label.down { fill: var(--err-text); }
+
+.legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1.25rem;
+    list-style: none;
+    margin: 0.75rem 0 0;
+    padding: 0;
+    color: var(--muted);
+    font-size: 0.8125rem;
+}
+
+.legend li { display: inline-flex; align-items: center; gap: 0.375rem; }
+.legend-order { width: 1.125rem; height: 1.125rem; font-size: 0.6875rem; }
+
+.swatch {
+    display: inline-block;
+    width: 0.375rem;
+    height: 1rem;
+    border-radius: 2px;
+}
+
+.swatch.ok { background: var(--ok-line); }
+.swatch.err { background: var(--err-line); }
+.swatch.absent { background: var(--border); }
+
+.detail-facts { margin: 1rem 0; }
+
+.check { display: inline-flex; gap: 0.5rem; align-items: center; }
+
+.klipper-line { margin: 0.75rem 0; font-weight: 500; }
+
+.plan {
+    list-style: none;
+    margin: 0 0 1rem;
+    padding: 0;
+}
+
+.plan-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.625rem;
+    padding: 0.625rem 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.plan-item input { margin-top: 0.25rem; }
+.plan-item.out { color: var(--muted); }
+.plan-main { flex: 1 1 auto; min-width: 0; }
+.plan-main .name { padding: 0; font-weight: 500; }
+.plan-why { color: var(--muted); font-size: 0.8125rem; }
+
+.log-box { margin-top: 1rem; }
+.log-box summary { cursor: pointer; color: var(--primary); margin-bottom: 0.5rem; }

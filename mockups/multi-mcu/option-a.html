@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Klipper MCU: option A (tree in the status card)</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="../../cockpit/mcu.css" rel="stylesheet">
+    <link href="mockup.css" rel="stylesheet">
+</head>
+<body>
+<nav class="mock-bar" aria-label="Mockup controls">
+    <strong>Mockup</strong>
+    <a href="option-a.html" aria-current="page">A: tree</a>
+    <a href="option-b.html">B: diagram</a>
+    <label>Scenario <select id="mock-scenario"></select></label>
+    <label>Run outcome <select id="mock-outcome"></select></label>
+    <label><input id="mock-auto" type="checkbox" checked> Auto-advance</label>
+    <button id="mock-step" class="secondary" type="button">Next step</button>
+    <button id="mock-theme" class="secondary" type="button">Dark theme</button>
+    <button id="mock-reset" class="link" type="button">Reset</button>
+</nav>
+
+<main class="page">
+    <div class="side">
+        <div id="running" class="alert warning" hidden>
+            <strong>A flash run is in progress.</strong>
+            Until it has finished, do not switch the printer off, restart Klipper,
+            or update or restart Moonraker. Closing this page does not stop the run.
+        </div>
+
+        <section class="card">
+            <header class="card-head">
+                <h1>Klipper MCU firmware</h1>
+                <button class="link" type="button">Refresh</button>
+            </header>
+            <p id="summary" class="summary"></p>
+            <dl class="facts">
+                <dt>Host Klipper</dt><dd id="host"></dd>
+                <dt>Klipper</dt><dd id="klipper"></dd>
+            </dl>
+
+            <h2 class="sub-head">Boards</h2>
+            <ul id="tree" class="tree"></ul>
+
+            <div id="order" class="order-box"></div>
+
+            <div class="actions">
+                <button id="flash" class="primary" type="button">Build and flash</button>
+                <button id="build-only" class="secondary" type="button">Build only</button>
+                <span id="action-note" class="note"></span>
+            </div>
+            <div id="confirm" class="confirm" hidden></div>
+        </section>
+    </div>
+
+    <section class="card output">
+        <header class="card-head">
+            <h2 id="output-title">Output</h2>
+            <span id="output-state" class="badge" hidden></span>
+        </header>
+        <p id="output-summary" class="note">No run or build yet.</p>
+        <ol id="steps" class="steps" hidden></ol>
+        <div id="report" hidden></div>
+        <pre id="log" class="log" hidden></pre>
+    </section>
+</main>
+<script src="mockup.js"></script>
+<script src="option-a.js"></script>
+</body>
+</html>

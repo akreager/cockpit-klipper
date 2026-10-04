@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Klipper MCU: option B (diagram and flash plan)</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="../../cockpit/mcu.css" rel="stylesheet">
+    <link href="mockup.css" rel="stylesheet">
+</head>
+<body>
+<nav class="mock-bar" aria-label="Mockup controls">
+    <strong>Mockup</strong>
+    <a href="option-a.html">A: tree</a>
+    <a href="option-b.html" aria-current="page">B: diagram</a>
+    <label>Scenario <select id="mock-scenario"></select></label>
+    <label>Run outcome <select id="mock-outcome"></select></label>
+    <label><input id="mock-auto" type="checkbox" checked> Auto-advance</label>
+    <button id="mock-step" class="secondary" type="button">Next step</button>
+    <button id="mock-theme" class="secondary" type="button">Dark theme</button>
+    <button id="mock-reset" class="link" type="button">Reset</button>
+</nav>
+
+<main class="page-b">
+    <section class="card diagram-card">
+        <header class="card-head">
+            <h1>Klipper MCU firmware</h1>
+            <button class="link" type="button">Refresh</button>
+        </header>
+        <p id="summary" class="summary"></p>
+        <div class="diagram-wrap">
+            <svg id="diagram" role="group" aria-label="Boards and how the host reaches them"></svg>
+        </div>
+        <ul class="legend">
+            <li><span class="swatch ok"></span>matches the host</li>
+            <li><span class="swatch err"></span>blocks Klipper</li>
+            <li><span class="swatch absent"></span>not found</li>
+            <li><span class="legend-order">1</span>flash order</li>
+        </ul>
+    </section>
+
+    <section id="detail" class="card detail-card"></section>
+
+    <section class="card plan-card">
+        <header class="card-head">
+            <h2>Flash plan</h2>
+            <span id="plan-state" class="badge" hidden></span>
+        </header>
+        <div id="running" class="alert warning" hidden>
+            <strong>A flash run is in progress.</strong>
+            Do not switch the printer off, restart Klipper, or update or restart
+            Moonraker. Closing this page does not stop the run.
+        </div>
+        <p id="klipper" class="klipper-line"></p>
+        <ol id="plan" class="plan"></ol>
+        <div id="others"></div>
+        <div id="plan-actions" class="actions">
+            <button id="flash" class="primary" type="button">Build and flash</button>
+            <button id="build-only" class="secondary" type="button">Build only</button>
+            <span id="action-note" class="note"></span>
+        </div>
+        <div id="confirm" class="confirm" hidden></div>
+        <div id="report" hidden></div>
+        <details id="log-box" class="log-box" hidden>
+            <summary>Log</summary>
+            <pre id="log" class="log"></pre>
+        </details>
+    </section>
+</main>
+<script src="mockup.js"></script>
+<script src="option-b.js"></script>
+</body>
+</html>
