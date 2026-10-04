@@ -13,7 +13,10 @@ SKR 1.3 from v0.13.0-745 to v0.13.0-786, with Klipper down for 14 s (see
 "The unit"). The failure paths were tested first: printer off, print
 running, and a bad SD card. The Cockpit page (`cockpit/`) works in
 Cockpit 362: Build only, and a Build and flash run that failed at the SD
-card.
+card. Next: a real flash from the page with a name-brand card, because
+the card that flashed 786 has failed every run since.
+Only one MCU per printer is supported: Klipper's `mcu`, one board per
+settings file. Extra `[mcu <name>]` boards are not handled yet.
 This file began as a handoff from a session in the private `printer-config`
 repo. Facts marked **(verified)** were checked against the printer or the
 upstream source on that date.
@@ -106,6 +109,9 @@ Keep the tool generic.
     times, one USB round trip each). The board was unaffected: Klipper
     reset it after each run, its bootloader saw whatever was left on the
     card, and it still booted 786.
+  - At 17:00, from the page, the same card no longer even started up:
+    "failed to reset SD Card", then "failed to mount SD Card, returned
+    FR_NOT_READY". Again the board kept 786.
 - **Klipper bug (at 786):** `FatFile.close()` in `spi_flash.py` logs a
   failed close with `%d` but passes the `FRESULT` name, a string. The
   resulting `TypeError` hides the close error. Not yet reported upstream.
@@ -377,9 +383,12 @@ journal and the page.
     free of its noise.
   - On failure it prints each `ERROR` record of that log whose traceback
     runs through `spi_flash.py`, with the exception that handler caught
-    (the last in the chain, all its lines), e.g. `error: flash_sdcard:
-    error initializing sdcard (OSError: flash_sdcard: SD Card did not
-    come out of IDLE after reset)`. Errors from `serialhdl.py` while the
+    (the last in the chain), e.g. `error: flash_sdcard: error
+    initializing sdcard (OSError: flash_sdcard: SD Card did not come out
+    of IDLE after reset)`. A multi-line message prints as its first line,
+    `; `, then the rest joined with spaces, because Klipper wraps its
+    notes at about 60 columns (e.g. "failed to reset SD Card; Note that
+    older (Version 1.0) SD cards can not be hot swapped. …"). Errors from `serialhdl.py` while the
     flasher reconnects after the reset are retries and are left out.
     Output before the first record, e.g. a crash on import or an argument
     error, counts too.
@@ -522,11 +531,18 @@ ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu
 
 ## Working here
 
-- The dev machine (aenima-ubuntu) is not the printer host. Reading the
-  printer through Moonraker's HTTP API works from here; building and
-  flashing happen on the printer host, run by Allen or through Cockpit's
-  terminal. Do nothing from here that changes the printer's state (power,
-  service restarts, flashing) without asking.
+- Sessions run either on the dev machine (aenima-ubuntu) or on the
+  printer host itself. From the dev machine, the printer is readable
+  through Moonraker's HTTP API, and building and flashing happen on the
+  printer host. On the printer host, `status`, `build` and `preflight` are
+  safe to run. Wherever the session runs, do nothing that changes the
+  printer's state (power, service restarts, flashing, installing system
+  files) without asking Allen.
+- **Testing the page without a browser:** run `mcu.js` in Node's `vm`
+  with a stub DOM, `localStorage` and `cockpit` object. The stub's
+  `spawn` runs the real commands with `child_process` and only logs
+  `superuser` ones. That catches wrong field names and logic errors; the
+  layout still needs a look in Cockpit.
 - Moonraker serves only the `config`, `logs` and `gcodes` roots; nothing in
   the Klipper checkout is reachable through it.
 - Any shell scripts go through `shellcheck` (not installed on the dev
@@ -560,10 +576,13 @@ ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu
      then a print running (must refuse). Only then a real flash, with the
      printer idle. Both tests passed on 2026-10-03, and so did the first
      real flash.
-  3. Build the page last and test it in Cockpit.
+  3. Build the page last and test it in Cockpit. Done 2026-10-03; Allen
+     tried Build only and a Build and flash run (the card failed).
   4. After the first real flash, confirm the board's `mcu_version` equals
      the host version in klippy.log or Mainsail. Done 2026-10-03: both
      v0.13.0-786-g461c4e372.
+  5. Still to do: a successful flash started from the page, with a new
+     card.
 - `printer-config` workflow: edit → commit → push to Gitea → the printer
   pulls through Mainsail's Update Manager. Printer-side edits go back with
   the `PUSH_CONFIG` macro. Files there also appear in Mainsail's config
