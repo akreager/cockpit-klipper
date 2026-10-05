@@ -110,6 +110,36 @@ busy state after write`: the card starts up but fails while writing. Try
 another card, preferably a name-brand one. The board keeps its old
 firmware.
 
+**The printer is on, but the board does not show up on USB.** Neither the
+page nor the service can flash it then: Klipper's SD-card flasher works
+through the Klipper firmware running on the board. (With `POWER_DEVICE` set,
+the page and `status` tell this apart from a printer that is switched off.)
+The kernel log shows what the board does when the printer is switched on:
+
+```sh
+journalctl -k --since "10 min ago" | grep -iE "usb|cdc_acm"
+```
+
+`device descriptor read/64, error -71` and `unable to enumerate USB device`
+mean that something is attached but does not answer. Check, in this order:
+
+1. The USB cable, at both ends, or try another one.
+2. Switch the printer off, take the SD card out and switch it on again.
+   With no card, the bootloader just starts the firmware it has. If the board
+   comes back, look at the card on a computer: a `FIRMWARE.CUR` on it means
+   the bootloader flashed a `firmware.bin` from that card. Use a FAT32 card,
+   preferably 32 GB or smaller.
+3. Flash by hand. Every build that passes validation is also kept as
+   `~/.cache/klipper-mcu-flash/validated.bin` (run *Build only* if there is
+   none yet). The page's *Download* button saves it under the name the
+   board's bootloader looks for (`firmware.bin` for most boards; while the
+   board is missing, `status` prints both). Switch the printer off, copy
+   that file onto the board's SD card, put the card back and switch the
+   printer on. The bootloader installs it and renames it (`FIRMWARE.CUR` on
+   most boards).
+   Boards whose flasher converts the firmware first (MKS Robin, Chitu) need
+   that converted file instead; see Klipper's `docs/SDCard_Updates.md`.
+
 ## License
 
 GNU GPLv3, the same as Klipper and Moonraker. See [LICENSE](LICENSE).

@@ -26,12 +26,18 @@
             </header>
             <p id="summary" class="summary">Reading status…</p>
             <div id="status-error" class="alert danger" hidden></div>
+            <div id="recover" class="alert warning" hidden>
+                <strong>The board cannot be flashed from here.</strong>
+                The flasher works through the Klipper firmware on the board, and the
+                board does not show up on USB. Check its USB cable.
+                <span id="recover-how"></span>
+            </div>
             <dl class="facts">
                 <dt>Host Klipper</dt><dd id="host">…</dd>
                 <dt>Board</dt><dd id="board">…</dd>
                 <dt>Printer</dt><dd id="device">…</dd>
                 <dt>Klipper</dt><dd id="klipper">…</dd>
-                <dt>Last build</dt><dd id="build">…</dd>
+                <dt>Last build</dt><dd class="with-link"><span id="build">…</span><button id="download" class="link" type="button" hidden>Download</button></dd>
                 <dt>Settings</dt><dd id="settings">…</dd>
             </dl>
             <div class="actions">

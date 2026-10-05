@@ -176,6 +176,17 @@ h1, h2 {
     overflow-wrap: anywhere;
 }
 
+.facts dd.with-link {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 0.75rem;
+}
+
+.facts button.link {
+    padding: 0;
+}
+
 @media (max-width: 30rem) {
     .facts { grid-template-columns: 1fr; gap: 0; }
     .facts dd { margin-bottom: 0.5rem; }

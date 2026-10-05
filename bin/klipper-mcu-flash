@@ -31,6 +31,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
 DEFAULT_SETTINGS = "~/printer_data/config/firmware/mcu-flash.conf"
 REQUIRED = ("KLIPPER_DIR", "KCONFIG", "DEVICE", "BOARD")
@@ -42,6 +44,8 @@ DEFAULTS = {
     "BUILD_DIR": "~/.cache/klipper-mcu-flash",
     "FLASH_ARGS": "",
     "FLASH_APPLICATION_ADDRESS": "",
+    "POWER_DEVICE": "",
+    "MOONRAKER_URL": "http://localhost:7125",
 }
 PATH_KEYS = ("KLIPPER_DIR", "KCONFIG", "DEVICE", "KLIPPY_ENV",
              "KLIPPY_SOCKET", "KLIPPY_LOG", "BUILD_DIR")
@@ -96,6 +100,9 @@ def load_settings(path):
     for key in PATH_KEYS:
         if not os.path.isabs(settings[key]):
             raise Error("%s: %s must be an absolute path" % (path, key))
+    if not re.match(r"https?://", settings["MOONRAKER_URL"]):
+        raise Error("%s: MOONRAKER_URL must start with http:// or https://"
+                    % path)
     settings["_path"] = path
     return settings
 
@@ -156,6 +163,62 @@ def klippy_status(settings, objects, timeout=5.):
         raise Error("cannot talk to Klipper on %s: %s" % (path, e))
     finally:
         sock.close()
+
+
+######################################################################
+# The printer's power switch, as Moonraker sees it
+######################################################################
+
+def power_state(settings):
+    """{"device", "state", "error"} for POWER_DEVICE, or None if unset.
+
+    The state is Moonraker's last known one. Asking Moonraker to poll the
+    device instead could make it start Klipper (bound_services) in the
+    middle of a run, if the plug was switched on outside Moonraker."""
+    name, base = settings["POWER_DEVICE"], settings["MOONRAKER_URL"]
+    if not name:
+        return None
+    power = {"device": name, "state": None, "error": None}
+    try:
+        with urllib.request.urlopen(base.rstrip("/")
+                                    + "/machine/device_power/devices",
+                                    timeout=3) as res:
+            devices = json.load(res)["result"]["devices"]
+        states = {d["device"]: d["status"] for d in devices}
+    except urllib.error.HTTPError as e:
+        power["error"] = "Moonraker at %s answered HTTP %d %s" % (
+            base, e.code, e.reason)
+    except OSError as e:
+        power["error"] = "cannot reach Moonraker at %s: %s" % (
+            base, getattr(e, "reason", e))
+    except (ValueError, KeyError, TypeError):
+        power["error"] = "unexpected reply from Moonraker at %s" % base
+    else:
+        if name in states:
+            power["state"] = states[name]
+        else:
+            power["error"] = "Moonraker has no power device %s" % name
+    return power
+
+
+def board_missing(settings):
+    """Why the board cannot be flashed while DEVICE is missing."""
+    missing = "%s is missing" % settings["DEVICE"]
+    power = power_state(settings)
+    if power and power["state"] == "on":
+        return ("Moonraker reports %s on, but the board is not connected "
+                "(%s). The flasher works through the Klipper firmware on "
+                "the board, so it cannot reach a board that does not show "
+                "up on USB; see the README on flashing by hand"
+                % (power["device"], missing))
+    if power and power["state"] == "off":
+        return ("Moonraker reports %s off: the printer is switched off "
+                "(%s)" % (power["device"], missing))
+    msg = "the board is not connected (%s). Is the printer switched on?" % missing
+    if power:
+        msg += " (Its power state is unknown: %s.)" % (
+            power["error"] or power["state"])
+    return msg
 
 
 ######################################################################
@@ -262,6 +325,7 @@ def build_paths(settings):
             "bin": os.path.join(out, "klipper.bin"),
             "dict": os.path.join(out, "klipper.dict"),
             "record": os.path.join(bdir, "build.json"),
+            "validated": os.path.join(bdir, "validated.bin"),
             "flash_record": os.path.join(bdir, "flash.json"),
             "flash_log": os.path.join(bdir, "flash.log"),
             "lock": os.path.join(bdir, "lock")}
@@ -380,9 +444,15 @@ def collect_status(settings):
         build = load_build(settings)
     except Error:
         build = None
+    if build:
+        # Builds from before validated.bin existed have none.
+        validated = build_paths(settings)["validated"]
+        build["bin"] = (validated if os.path.exists(validated)
+                        and sha256(validated) == build["bin_sha256"] else None)
     return {"settings": settings["_path"],
             "host": {"version": host_version, "commit": host_commit},
-            "board": board, "klipper": klipper, "build": build}
+            "board": board, "klipper": klipper, "build": build,
+            "power": power_state(settings), "card_name": card_name(settings)}
 
 
 def cmd_status(settings, args):
@@ -410,6 +480,11 @@ def cmd_status(settings, args):
         say(line)
     else:
         say("Board:    unknown (Klipper has not reported it and klippy.log has no record)")
+    power = st["power"]
+    if power and power["state"]:
+        say("Power:    %s (Moonraker device %s)" % (power["state"], power["device"]))
+    elif power:
+        say("Power:    unknown (%s)" % power["error"])
     say("Device:   %s %s" % ("present" if board["present"] else "absent",
                              board["device"]))
     if kl["error"]:
@@ -425,6 +500,9 @@ def cmd_status(settings, args):
         say("Build:    %s, validated %s" % (build["version"], build["built"]))
     else:
         say("Build:    none")
+    if not board["present"] and build and build["bin"] and st["card_name"]:
+        say("By hand:  copy %s to the board's SD card as %s"
+            % (build["bin"], st["card_name"]))
 
 
 def cmd_build(settings, args):
@@ -472,6 +550,10 @@ def cmd_build(settings, args):
                 fw["version"],
                 "running firmware" if fw["source"] == "klipper" else fw["source"]))
         validate(settings, paths, built, fw)
+        # For flashing by hand. It is replaced, never deleted, so a reader
+        # never finds it missing or half-written, even during a build.
+        shutil.copyfile(paths["bin"], paths["validated"] + ".tmp")
+        os.replace(paths["validated"] + ".tmp", paths["validated"])
         record = {"version": built.get("version"),
                   "commit": head,
                   "kconfig": kconfig,
@@ -568,6 +650,31 @@ def flasher(settings):
     return [python, script]
 
 
+def card_name(settings):
+    """The name under which the board's bootloader takes new firmware from
+    its SD card, as spi_flash.py uploads it, for copying a build there by
+    hand. None if BOARD is unknown or needs a converted file rather than a
+    copy of klipper.bin."""
+    path = os.path.join(settings["KLIPPER_DIR"], "scripts", "spi_flash",
+                        "board_defs.py")
+    defs = {}
+    try:
+        with open(path) as f:
+            # exec, not import: importing would leave bytecode in Klipper's
+            # checkout.
+            exec(compile(f.read(), path, "exec"), defs)
+        board = defs["lookup_board"](settings["BOARD"])
+    except Exception:
+        return None
+    if not board or board.get("conversion_script"):
+        return None
+    name = board.get("firmware_path", "firmware.bin")
+    if board.get("requires_unique_fw_name"):
+        head, tail = os.path.split(name)
+        name = os.path.join(head, time.strftime("%Y%m%d%H%M%S") + tail)
+    return name
+
+
 LOG_RECORD = re.compile(r"(DEBUG|INFO|WARNING|ERROR|CRITICAL):[^:]*:(.*)$")
 
 
@@ -643,8 +750,7 @@ def check_board_name(settings):
 def cmd_preflight(settings, args):
     build = load_build(settings)
     if not os.path.exists(settings["DEVICE"]):
-        raise Error("the board is not connected (%s is missing). Is the "
-                    "printer switched on?" % settings["DEVICE"])
+        raise Error(board_missing(settings))
     check_board_name(settings)
     kstatus = klippy_status(settings, {"print_stats": ["state"],
                                        "idle_timeout": ["state"]})

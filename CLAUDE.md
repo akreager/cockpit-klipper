@@ -6,7 +6,7 @@ to the printer's controller board. Klipper host updates still happen in
 Mainsail's Update Manager. Afterwards the tool brings the board to the same
 version safely, in one click.
 
-Status (2026-10-03): the worker `bin/klipper-mcu-flash` and the systemd
+Status (2026-10-05): the worker `bin/klipper-mcu-flash` and the systemd
 unit work on the printer host; the worker's tests also pass on the dev
 machine (see "Working here"). On 2026-10-03 the unit flashed the CR-10S's
 SKR 1.3 from v0.13.0-745 to v0.13.0-786, with Klipper down for 14 s (see
@@ -15,6 +15,12 @@ running, and a bad SD card. The Cockpit page (`cockpit/`) works in
 Cockpit 362: Build only, and a Build and flash run that failed at the SD
 card. Next: a real flash from the page with a name-brand card, because
 the card that flashed 786 has failed every run since.
+On 2026-10-05 the SKR 1.3 no longer showed up on USB, although the printer
+was on, after being off since 2026-10-03 with no flash in between (see "The
+board does not show up on USB" under "Risks"). Since then the page tells
+that apart from a printer that is off (`POWER_DEVICE`) and offers the last
+validated build for a flash by hand. Tested on the dev machine in a local
+Cockpit 360 and Firefox, not yet on the printer host.
 Only one MCU per printer is supported: Klipper's `mcu`, one board per
 settings file. Extra `[mcu <name>]` boards are not handled yet.
 This file began as a handoff from a session in the private `printer-config`
@@ -59,6 +65,12 @@ Keep the tool generic.
   behind the host and fixes that.
 - **Klipper stays on Moonraker's `dev` update channel.** Do not propose
   `channel: stable` (see "Why not the stable channel" below).
+- **A flash needs the board's device; the printer's power state is never
+  enough.** Klipper's SD-card flasher works through the Klipper firmware
+  running on the board, so a powered board that does not show up on USB
+  cannot be flashed with it. The power state (`POWER_DEVICE`) only picks the
+  message and the advice (decided 2026-10-05, when Allen proposed gating
+  on the smart plug's state instead).
 
 ## How flashing works on this board (verified in Klipper @ `2d7717e3`)
 
@@ -191,6 +203,24 @@ Keep the tool generic.
     unix-socket channel (`doc/protocol.md`), so the page can talk to
     Klipper's API socket directly without Moonraker.
   - `cockpit.http(port | unix path)` and `cockpit.file()`.
+    `cockpit.file(path, {binary: true}).read()` gives a `Uint8Array`, or
+    `null` for a missing file.
+- **Downloads (verified 2026-10-05 in Cockpit 360 with Firefox 157):**
+  - A `blob:` download (`<a download>`) from a page does nothing in Firefox:
+    the shell's CSP `default-src 'self'` applies as `frame-src` ("blocked
+    the loading of a resource (frame-src) at blob:…"). The page gets no
+    error; only the browser console shows it.
+  - Cockpit's own pages download through an external channel: a GET of
+    `/cockpit/channel/<cockpit.transport.csrf_token>?<base64 of the
+    channel's JSON options>` (the path from `cockpit.transport.uri("channel/"
+    + token)`), with `external: {"content-disposition": …, "content-type":
+    …}` in the options, loaded in a hidden iframe.
+  - That URL answers 200 with the `external` headers and **an empty body**
+    for an `fsread1` of a missing file and for a spawned process that fails
+    (exit status or signal). Only channel problems give an error page
+    without those headers: 403 for access denied, 404 for a missing
+    program. `fsread1` reads at most 16 MiB unless `max_read_size` says
+    otherwise.
 - **Version:** the first target host runs Cockpit 362. Do not raise the
   manifest's `requires` above what the page actually needs; the page sets
   none.
@@ -229,6 +259,11 @@ error. The worker reads `-c FILE`, else `$KLIPPER_MCU_FLASH_CONF`, else
 `~/printer_data/config/firmware/mcu-flash.conf`. For the CR-10S that file
 lives in `printer-config` next to the board's kconfig
 (`firmware/skr13.config`); this repo ships only the example.
+
+`POWER_DEVICE` (optional) names the Moonraker power device that switches
+the printer; `MOONRAKER_URL` (default `http://localhost:7125`, must be
+`http://` or `https://`) says where Moonraker is. Without `POWER_DEVICE`
+the worker never contacts Moonraker.
 
 ### The unit (`systemd/cockpit-klipper-flash.service`)
 
@@ -344,7 +379,29 @@ journal and the page.
 - **`status [--json]`:** host `git describe`, board version and source,
   commits behind/ahead (`git rev-list --count`), whether `DEVICE` exists,
   service state, Klipper state and message, print and idle state, last
-  validated build. `--json` is meant for the page.
+  validated build, the power state and the SD card file name (both below).
+  `--json` is meant for the page. While the board is missing, the text
+  output also says which file to copy to the card, and under which name.
+- **Power state** (only with `POWER_DEVICE`):
+  - It comes from `GET <MOONRAKER_URL>/machine/device_power/devices`, which
+    returns Moonraker's cached state without polling the device
+    (`_handle_list_devices()` in `moonraker/components/power.py`, verified
+    on the host 2026-10-05).
+  - The single-device request would poll the plug. A changed state then runs
+    `process_power_changed()`, which can start Klipper (`bound_services`) in
+    the middle of a run.
+  - Timeout 3 s. A failure only makes the state unknown, with the reason;
+    it is never a refusal of its own.
+- **SD card file name** (`card_name` in the JSON):
+  - It is the name under which `spi_flash.py` uploads, from Klipper's
+    `scripts/spi_flash/board_defs.py`: `firmware_path` (default
+    `firmware.bin`). Boards with `requires_unique_fw_name`
+    (`creality-v4.2.2`) get the same timestamp prefix as there.
+  - It is null for an unknown `BOARD` and for boards with a
+    `conversion_script` (MKS Robin, Chitu). For those a copy of
+    `klipper.bin` would be the wrong file.
+  - `board_defs.py` is `exec`'d, not imported, so that no bytecode lands in
+    Klipper's checkout.
 - **`build`:**
   - Deletes the previous `build.json` first, so a failed or rejected build
     can never be flashed.
@@ -359,16 +416,29 @@ journal and the page.
     so is "the board already runs this commit".
   - Refuses if Klipper's `HEAD` changed during the build, e.g. because
     Moonraker updated Klipper meanwhile.
-  - On success it writes `BUILD_DIR/build.json` with the version, commit
-    and SHA-256 of `klipper.bin` and `klipper.dict`.
+  - On success it copies `klipper.bin` to `BUILD_DIR/validated.bin` (a copy
+    and then a rename), then writes `BUILD_DIR/build.json` with the
+    version, commit and SHA-256 of `klipper.bin` and `klipper.dict`.
+  - No build deletes `validated.bin`; a rejected build leaves the previous
+    one in place. So a reader, e.g. the page's download, never finds it
+    missing or half-written.
+  - `status` reports it as `build.bin` when its hash matches `bin_sha256`,
+    else null. Builds from before 2026-10-05 have none.
 - **`preflight`** (called `check-idle` in the handoff):
   - Runs **after** the build, immediately before Klipper is stopped, so a
     print started during the build cannot be cut off.
   - Requires a validated build whose files still match their hashes, that
-    `DEVICE` exists ("Is the printer switched on?"; it never powers
-    anything on), and that `spi_flash.py -l` knows `BOARD`. If the flasher
-    itself fails, for example because the OS upgrade broke `KLIPPY_ENV`,
-    it reports that error rather than an unknown board.
+    `DEVICE` exists (it never powers anything on), and that `spi_flash.py
+    -l` knows `BOARD`.
+  - Without `DEVICE` the refusal depends on the power state:
+    - "Moonraker reports X on, but the board is not connected (…). The
+      flasher works through the Klipper firmware on the board, …; see the
+      README on flashing by hand".
+    - "Moonraker reports X off: the printer is switched off".
+    - Otherwise "Is the printer switched on?", with the reason the state is
+      unknown when `POWER_DEVICE` is set.
+  - If the flasher itself fails, for example because the OS upgrade broke
+    `KLIPPY_ENV`, it reports that error rather than an unknown board.
   - Refuses on `print_stats.state` `printing`/`paused` or
     `idle_timeout.state` `Printing`. A missing socket or a refused
     connection means Klipper is not running, which is fine. A socket that
@@ -467,20 +537,50 @@ ships only inside its own pages' bundles. It is installed by symlinking
 - **Build and flash:**
   - Disabled while a run or a build is in progress, without administrative
     access, when the status could not be read, while printing, or when the
-    board is absent. In that last case the page says the printer looks
-    switched off and leaves it at that: no power-on button through
-    Moonraker (decided 2026-10-02).
+    board is absent. There is no power-on button through Moonraker
+    (decided 2026-10-02).
+  - When the board is absent, the note next to the button depends on the
+    power state:
+    - "The printer is switched off."
+    - "The printer looks switched off." when the state is unknown or there
+      is no `POWER_DEVICE`; the page's wording before 2026-10-05.
+    - With the printer on: "The board is not connected; see above." Then
+      the summary reads "The printer is on, but its board is not
+      connected." and a warning box says why the flasher cannot help: check
+      the USB cable, or flash by hand.
   - After an inline confirmation, the page runs `systemctl start
     --no-block cockpit-klipper-flash.service` with `superuser: "require"`.
     It then polls for up to 15 s until `InvocationID` changes.
   - While a run is in progress, a warning says not to switch the printer
     off, restart Klipper, or update or restart Moonraker.
+- **Download** (next to *Last build*), for flashing by hand:
+  - Offered when the status has `build.bin` (`validated.bin`) and a
+    `card_name`. Disabled during a build or a run.
+  - It reads `validated.bin` with `cockpit.file` and checks its SHA-256
+    against `bin_sha256`. `crypto.subtle` needs a secure context: HTTPS, or
+    localhost.
+  - Then it loads the external-channel URL (`fsread1`) in a hidden iframe,
+    saved under `card_name`'s last component. An error page in that iframe
+    (its `<title>`) becomes the page's error.
+  - See "Downloads" under "Cockpit facts" for why it is not a `blob:` and
+    why it checks the file first.
 - **Tested 2026-10-03** in Node, with a stub DOM whose `cockpit.spawn` ran
   the real commands (the root start was only logged). Passed: the status,
   the last run's log and result, the start path up to the polling, no
   admin access, the dark theme, and a real Build only. The same day Allen
   tried it in Cockpit (dark theme): Build only, and a Build and flash run
   that failed at the SD card, as expected with that card.
+- **Tested 2026-10-05** against a copy of the printer's state that day: the
+  real Moonraker (plug on), klippy logs, build files and Klipper at
+  `461c4e372`, a fake Klipper socket reporting "Unable to connect", and no
+  board device.
+  - In Node: every power state, no build, a build without `validated.bin`,
+    a `conversion_script` board, and Moonraker unreachable.
+  - In a local Cockpit 360 with headless Firefox 157 (see "Working here"):
+    the same plug-on state; a download (42,412 bytes, the validated
+    SHA-256); a removed or changed `validated.bin` (refused, nothing saved);
+    the dark theme; a 480 px wide window.
+  - Not yet tried on the printer host.
 - **Privileges:** starting the unit uses Cockpit's administrative access.
   Optional later: a polkit rule that lets the Klipper user start just this
   unit without admin mode.
@@ -525,6 +625,19 @@ ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu
   `ExecStopPost=` starts it again, and Klipper then waits for the board.
 - **Printer powered off:** the device is missing. Fail fast with a clear
   message before anything is stopped.
+- **The board does not show up on USB although the printer is on** (seen
+  2026-10-05):
+  - At every power-on the kernel logged `device descriptor read/64, error
+    -71` … `unable to enumerate USB device` on the port where the board had
+    been `1d50:614e Klipper lpc1768`.
+  - The last flash run (2026-10-03 17:00) had failed at the SD card and left
+    the board on 786. The board then ran until the printer was switched off
+    at 21:02, and nothing was flashed before it failed.
+  - The flasher cannot help (see "Settled decisions").
+  - Rule out the USB cable, then the SD card: boot without it. A
+    `FIRMWARE.CUR` on the card means the bootloader took a `firmware.bin`
+    from it.
+  - Then flash by hand with `validated.bin` (README, "Troubleshooting").
 - **During a print:** `preflight` refuses.
 - **Downtime:** Klipper is down for about 15 s per flash (14 s measured
   on the SKR 1.3, 2026-10-03). The build runs before Klipper stops.
@@ -542,7 +655,39 @@ ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu
   with a stub DOM, `localStorage` and `cockpit` object. The stub's
   `spawn` runs the real commands with `child_process` and only logs
   `superuser` ones. That catches wrong field names and logic errors; the
-  layout still needs a look in Cockpit.
+  layout still needs a look in Cockpit. A stub DOM that creates elements on
+  demand also hides wrong IDs, so check that every `$("…")` ID exists in
+  `index.html`.
+- **Testing the page in a real Cockpit** (dev machine, no root, scratch
+  directory only; worked 2026-10-05 with Cockpit 360 from Ubuntu 26.04):
+  - Get Cockpit: `apt-get download cockpit-ws cockpit-bridge
+    cockpit-system`, then `dpkg -x` each into one root.
+  - Start it: `<root>/usr/lib/cockpit/cockpit-ws -a 127.0.0.1 -p 9091
+    --local-session=<root>/usr/bin/cockpit-bridge`, with
+    `PYTHONPATH=<root>/usr/lib/python3/dist-packages`,
+    `XDG_DATA_DIRS=<root>/usr/share` and `XDG_DATA_HOME=<scratch>`.
+    - A local session has no login, so bind to 127.0.0.1 only.
+    - It has no administrative access either.
+  - Serve the page from `<scratch>/cockpit/klipper-mcu/`.
+    - The manifest's `conditions` hide the page without the installed unit.
+      Serve a copy of the manifest without them and symlink the other files.
+    - The bridge lists packages once, at start: restart `cockpit-ws` after
+      adding one.
+  - Fake the unit: a `systemctl` first in `PATH` answers the page's
+    `systemctl show` for the unit, with `KLIPPER_MCU_FLASH_CONF` pointing
+    at test settings, and passes everything else on.
+  - Fake Klipper's socket: Unix socket paths must stay under 108 bytes, and
+    a scratch path can exceed that.
+    - Set `KLIPPY_SOCKET=/proc/self/cwd/k.sock` and start `cockpit-ws` in
+      the socket's directory.
+    - The bridge and everything it spawns keep that working directory.
+  - The browser: Firefox here is a snap and cannot see `/tmp`.
+    - Put its throwaway profile and download folder in
+      `~/snap/firefox/common/<name>`, and delete that folder afterwards.
+    - Drive it with `firefox --headless --marionette --no-remote --profile …`
+      (port from the `marionette.port` pref) and a small Marionette client.
+    - With `-remote-allow-system-access`, the client can read the browser
+      console (`Services.console`), where CSP errors show up.
 - Moonraker serves only the `config`, `logs` and `gcodes` roots; nothing in
   the Klipper checkout is reachable through it.
 - Any shell scripts go through `shellcheck` (not installed on the dev

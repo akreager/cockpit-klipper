@@ -27,6 +27,7 @@ const page = {
     admin: null,            // administrative access; null until known
     starting: null,         // {before, deadline} until a started run shows up
     building: false,        // a build started from this page is running
+    downloading: false,
     confirming: false,
     error: null,
     output: null,           // what the output card shows; see newOutput()
@@ -323,6 +324,61 @@ async function buildOnly() {
     render();
 }
 
+// Lets the browser save the last validated build under the name the board's
+// bootloader looks for. Cockpit's CSP blocks downloads from blob: URLs, so
+// the file comes through a same-origin channel URL, as in Cockpit's own
+// pages. That URL serves an empty file rather than an error when the file
+// is missing, so the file is checked against the build record first.
+async function download() {
+    const build = page.status.build;
+    const name = page.status.card_name.split("/").pop();
+    page.error = null;
+    page.downloading = true;
+    render();
+    const file = cockpit.file(build.bin, {binary: true});
+    try {
+        const data = await file.read();
+        if (data === null)
+            throw new Error(build.bin + " does not exist; run Build only again");
+        if (!window.crypto.subtle)
+            throw new Error("checking the file needs Cockpit over HTTPS");
+        const digest = new Uint8Array(await window.crypto.subtle.digest("SHA-256", data));
+        const hex = Array.from(digest, b => b.toString(16).padStart(2, "0")).join("");
+        if (hex !== build.bin_sha256)
+            throw new Error(build.bin + " does not match the last build; run Build only again");
+        const options = new TextEncoder().encode(JSON.stringify({
+            payload: "fsread1", binary: "raw", path: build.bin,
+            external: {
+                "content-disposition": "attachment; filename=\"" + name + "\"",
+                "content-type": "application/octet-stream",
+            },
+        }));
+        const channel = new URL(cockpit.transport.uri("channel/" + cockpit.transport.csrf_token));
+        const old = $("download-frame");
+        if (old)
+            old.remove();
+        const frame = document.createElement("iframe");
+        frame.id = "download-frame";
+        frame.hidden = true;
+        // A download loads no page; an error comes back as one.
+        frame.addEventListener("load", () => {
+            const title = frame.contentDocument && frame.contentDocument.title;
+            if (title) {
+                page.error = "Could not download the build: " + title;
+                render();
+            }
+        });
+        frame.src = channel.pathname + "?" + btoa(String.fromCharCode(...options));
+        document.body.appendChild(frame);
+    } catch (e) {
+        page.error = "Could not download the build: " + errorText(e);
+    } finally {
+        file.close();
+    }
+    page.downloading = false;
+    render();
+}
+
 /* Status */
 
 const refreshStatus = coalesce(async () => {
@@ -380,8 +436,40 @@ function boardText(board) {
     return text;
 }
 
+// The printer is on, yet its board does not show up on USB.
+function boardUnreachable(st) {
+    return !st.board.present && Boolean(st.power) && st.power.state === "on";
+}
+
+// Without POWER_DEVICE, all the page knows about a missing board is that
+// the printer may be off.
+function printerText(st) {
+    const power = st.power;
+    if (st.board.present)
+        return "connected";
+    if (boardUnreachable(st))
+        return "not found, although the printer is on (" + power.device + ")";
+    if (power && power.state === "off")
+        return "not found: the printer is switched off (" + power.device + ")";
+    let text = "not found: is the printer switched on?";
+    if (power)
+        text += " Its power state is unknown: " + (power.error || power.state) + ".";
+    return text;
+}
+
+function recoveryText(st) {
+    if (!st.card_name)
+        return "To flash it by hand, see Klipper's docs/SDCard_Updates.md.";
+    return (st.build && st.build.bin ? "To flash it by hand, switch"
+        : "To flash it by hand, run Build only first. Then switch") +
+        " the printer off, copy " + st.card_name + " (Download, under Last build) onto " +
+        "the board's SD card, put the card back and switch the printer on.";
+}
+
 function summary(st) {
     const b = st.board;
+    if (boardUnreachable(st))
+        return ["warn", "The printer is on, but its board is not connected."];
     if (!b.version)
         return ["warn", "The board's firmware version is not known."];
     if (b.behind === null || b.ahead === null)
@@ -415,14 +503,18 @@ function renderStatus() {
     $("summary").textContent = text;
     $("host").textContent = st.host.version || "unknown (is KLIPPER_DIR a git checkout?)";
     $("board").textContent = boardText(st.board);
-    $("device").textContent = st.board.present ? "connected"
-        : "not found: is the printer switched on?";
+    $("device").textContent = printerText(st);
     $("device").title = st.board.device;
+    $("recover").hidden = !boardUnreachable(st);
+    $("recover-how").textContent = recoveryText(st);
     $("klipper").textContent = klipperText(st.klipper);
     const build = st.build;
     $("build").textContent = !build ? "none"
         : build.version + ", validated " + build.built.replace("T", " ") +
           (build.commit === st.host.commit ? "" : " (not the host's current commit)");
+    $("download").hidden = !build || !build.bin || !st.card_name;
+    if (st.card_name)
+        $("download").textContent = "Download " + st.card_name.split("/").pop();
     $("settings").textContent = st.settings;
 }
 
@@ -441,8 +533,11 @@ function flashBlocker() {
         return "The status could not be read.";
     if (!st)
         return "Reading status…";
+    if (boardUnreachable(st))
+        return "The board is not connected; see above.";
     if (!st.board.present)
-        return "The printer looks switched off.";
+        return st.power && st.power.state === "off" ? "The printer is switched off."
+            : "The printer looks switched off.";
     if (["printing", "paused"].includes(st.klipper.print_state) ||
             st.klipper.idle_state === "Printing")
         return "A print is running.";
@@ -452,7 +547,8 @@ function flashBlocker() {
 function renderActions() {
     const blocker = flashBlocker();
     $("flash").disabled = blocker !== null;
-    $("build-only").disabled = !page.worker || isRunning() || page.building;
+    $("build-only").disabled = !page.worker || isRunning() || page.building || page.downloading;
+    $("download").disabled = isRunning() || page.building || page.downloading;
     $("action-note").textContent = blocker || "";
     $("running").hidden = !isRunning();
     $("setup-error").hidden = !page.setupError;
@@ -544,6 +640,7 @@ async function init() {
     });
     $("confirm-flash").addEventListener("click", startRun);
     $("build-only").addEventListener("click", buildOnly);
+    $("download").addEventListener("click", download);
 
     const permission = cockpit.permission({admin: true});
     page.admin = permission.allowed;
