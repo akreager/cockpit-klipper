@@ -1,0 +1,16 @@
+{
+    "version": 0,
+    "conditions": [
+        {"path-exists": "/etc/systemd/system/cockpit-klipper-flash.service"}
+    ],
+    "tools": {
+        "index": {
+            "label": "Klipper MCU",
+            "keywords": [
+                {
+                    "matches": ["klipper", "firmware", "flash", "mcu", "printer"]
+                }
+            ]
+        }
+    }
+}

@@ -10,9 +10,10 @@ Commands:
   build       build into BUILD_DIR and validate against the board's firmware
   preflight   refuse unless a flash can start now (run before stopping Klipper)
   flash       flash the last validated build (Klipper must be stopped)
+  report      after a flash: wait for Klipper and show what the board runs
 
 Only `flash` needs Klipper stopped; the systemd unit runs
-build -> preflight -> stop Klipper -> flash -> start Klipper.
+build -> preflight -> stop Klipper -> flash -> start Klipper -> report.
 """
 
 import argparse
@@ -29,6 +30,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 
 DEFAULT_SETTINGS = "~/printer_data/config/firmware/mcu-flash.conf"
 REQUIRED = ("KLIPPER_DIR", "KCONFIG", "DEVICE", "BOARD")
@@ -40,6 +44,8 @@ DEFAULTS = {
     "BUILD_DIR": "~/.cache/klipper-mcu-flash",
     "FLASH_ARGS": "",
     "FLASH_APPLICATION_ADDRESS": "",
+    "POWER_DEVICE": "",
+    "MOONRAKER_URL": "http://localhost:7125",
 }
 PATH_KEYS = ("KLIPPER_DIR", "KCONFIG", "DEVICE", "KLIPPY_ENV",
              "KLIPPY_SOCKET", "KLIPPY_LOG", "BUILD_DIR")
@@ -94,6 +100,9 @@ def load_settings(path):
     for key in PATH_KEYS:
         if not os.path.isabs(settings[key]):
             raise Error("%s: %s must be an absolute path" % (path, key))
+    if not re.match(r"https?://", settings["MOONRAKER_URL"]):
+        raise Error("%s: MOONRAKER_URL must start with http:// or https://"
+                    % path)
     settings["_path"] = path
     return settings
 
@@ -157,6 +166,62 @@ def klippy_status(settings, objects, timeout=5.):
 
 
 ######################################################################
+# The printer's power switch, as Moonraker sees it
+######################################################################
+
+def power_state(settings):
+    """{"device", "state", "error"} for POWER_DEVICE, or None if unset.
+
+    The state is Moonraker's last known one. Asking Moonraker to poll the
+    device instead could make it start Klipper (bound_services) in the
+    middle of a run, if the plug was switched on outside Moonraker."""
+    name, base = settings["POWER_DEVICE"], settings["MOONRAKER_URL"]
+    if not name:
+        return None
+    power = {"device": name, "state": None, "error": None}
+    try:
+        with urllib.request.urlopen(base.rstrip("/")
+                                    + "/machine/device_power/devices",
+                                    timeout=3) as res:
+            devices = json.load(res)["result"]["devices"]
+        states = {d["device"]: d["status"] for d in devices}
+    except urllib.error.HTTPError as e:
+        power["error"] = "Moonraker at %s answered HTTP %d %s" % (
+            base, e.code, e.reason)
+    except OSError as e:
+        power["error"] = "cannot reach Moonraker at %s: %s" % (
+            base, getattr(e, "reason", e))
+    except (ValueError, KeyError, TypeError):
+        power["error"] = "unexpected reply from Moonraker at %s" % base
+    else:
+        if name in states:
+            power["state"] = states[name]
+        else:
+            power["error"] = "Moonraker has no power device %s" % name
+    return power
+
+
+def board_missing(settings):
+    """Why the board cannot be flashed while DEVICE is missing."""
+    missing = "%s is missing" % settings["DEVICE"]
+    power = power_state(settings)
+    if power and power["state"] == "on":
+        return ("Moonraker reports %s on, but the board is not connected "
+                "(%s). The flasher works through the Klipper firmware on "
+                "the board, so it cannot reach a board that does not show "
+                "up on USB; see the README on flashing by hand"
+                % (power["device"], missing))
+    if power and power["state"] == "off":
+        return ("Moonraker reports %s off: the printer is switched off "
+                "(%s)" % (power["device"], missing))
+    msg = "the board is not connected (%s). Is the printer switched on?" % missing
+    if power:
+        msg += " (Its power state is unknown: %s.)" % (
+            power["error"] or power["state"])
+    return msg
+
+
+######################################################################
 # Versions
 ######################################################################
 
@@ -173,7 +238,9 @@ def git(settings, *args):
 def commit_of(settings, version):
     # Firmware versions look like v0.13.0-745-gf0892d82b, optionally followed
     # by -dirty-<build time>-<host> when built from a modified checkout.
-    m = re.search(r"-g([0-9a-f]{7,40})(?![0-9a-f])", version or "")
+    # Without reachable tags, git describe --always gives just the hash.
+    m = (re.search(r"-g([0-9a-f]{7,40})(?![0-9a-f])", version or "")
+         or re.match(r"([0-9a-f]{7,40})(?![0-9a-f])", version or ""))
     if not m:
         return None
     return git(settings, "rev-parse", "--verify", "--quiet",
@@ -258,6 +325,9 @@ def build_paths(settings):
             "bin": os.path.join(out, "klipper.bin"),
             "dict": os.path.join(out, "klipper.dict"),
             "record": os.path.join(bdir, "build.json"),
+            "validated": os.path.join(bdir, "validated.bin"),
+            "flash_record": os.path.join(bdir, "flash.json"),
+            "flash_log": os.path.join(bdir, "flash.log"),
             "lock": os.path.join(bdir, "lock")}
 
 
@@ -278,6 +348,12 @@ class Lock:
 
     def __exit__(self, *exc):
         self.f.close()
+
+
+def write_json(path, data):
+    with open(path + ".tmp", "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(path + ".tmp", path)
 
 
 def sha256(path):
@@ -322,6 +398,15 @@ def read_kconfig(path):
 # Commands
 ######################################################################
 
+def service_state(settings):
+    try:
+        return subprocess.run(
+            ["systemctl", "is-active", settings["KLIPPER_SERVICE"]],
+            stdout=subprocess.PIPE, universal_newlines=True).stdout.strip()
+    except OSError:
+        return None
+
+
 def collect_status(settings):
     try:
         kstatus = klippy_status(settings, {
@@ -344,13 +429,7 @@ def collect_status(settings):
         board["commit"] = board_commit
         board["behind"] = count_commits(settings, board_commit + "..HEAD")
         board["ahead"] = count_commits(settings, "HEAD.." + board_commit)
-    try:
-        service = subprocess.run(
-            ["systemctl", "is-active", settings["KLIPPER_SERVICE"]],
-            stdout=subprocess.PIPE, universal_newlines=True).stdout.strip()
-    except OSError:
-        service = None
-    klipper = {"service": service, "error": klippy_error,
+    klipper = {"service": service_state(settings), "error": klippy_error,
                "running": bool(kstatus and kstatus.running),
                "state": None, "state_message": None,
                "print_state": None, "idle_state": None}
@@ -365,9 +444,15 @@ def collect_status(settings):
         build = load_build(settings)
     except Error:
         build = None
+    if build:
+        # Builds from before validated.bin existed have none.
+        validated = build_paths(settings)["validated"]
+        build["bin"] = (validated if os.path.exists(validated)
+                        and sha256(validated) == build["bin_sha256"] else None)
     return {"settings": settings["_path"],
             "host": {"version": host_version, "commit": host_commit},
-            "board": board, "klipper": klipper, "build": build}
+            "board": board, "klipper": klipper, "build": build,
+            "power": power_state(settings), "card_name": card_name(settings)}
 
 
 def cmd_status(settings, args):
@@ -395,6 +480,11 @@ def cmd_status(settings, args):
         say(line)
     else:
         say("Board:    unknown (Klipper has not reported it and klippy.log has no record)")
+    power = st["power"]
+    if power and power["state"]:
+        say("Power:    %s (Moonraker device %s)" % (power["state"], power["device"]))
+    elif power:
+        say("Power:    unknown (%s)" % power["error"])
     say("Device:   %s %s" % ("present" if board["present"] else "absent",
                              board["device"]))
     if kl["error"]:
@@ -410,6 +500,9 @@ def cmd_status(settings, args):
         say("Build:    %s, validated %s" % (build["version"], build["built"]))
     else:
         say("Build:    none")
+    if not board["present"] and build and build["bin"] and st["card_name"]:
+        say("By hand:  copy %s to the board's SD card as %s"
+            % (build["bin"], st["card_name"]))
 
 
 def cmd_build(settings, args):
@@ -428,6 +521,7 @@ def cmd_build(settings, args):
         shutil.copyfile(kconfig, paths["kconfig"])
         make = ["make", "-C", kdir, "KCONFIG_CONFIG=" + paths["kconfig"],
                 "OUT=" + paths["out"] + "/"]
+        head = git(settings, "rev-parse", "HEAD")
         say("Building from %s with %s" % (kdir, kconfig))
         run(make + ["olddefconfig"])
         report_kconfig_changes(read_kconfig(kconfig),
@@ -440,6 +534,11 @@ def cmd_build(settings, args):
             built = json.load(f)
         say()
         say("Built:    %s" % built.get("version"))
+        # E.g. Moonraker updating Klipper mid-build would mix sources.
+        if head and (git(settings, "rev-parse", "HEAD") != head
+                     or commit_of(settings, built.get("version")) != head):
+            raise Error("Klipper's checkout changed during the build "
+                        "(an update?); build again")
         try:
             kstatus = klippy_status(settings, {"mcu": None})
         except Error as e:
@@ -451,23 +550,37 @@ def cmd_build(settings, args):
                 fw["version"],
                 "running firmware" if fw["source"] == "klipper" else fw["source"]))
         validate(settings, paths, built, fw)
+        # For flashing by hand. It is replaced, never deleted, so a reader
+        # never finds it missing or half-written, even during a build.
+        shutil.copyfile(paths["bin"], paths["validated"] + ".tmp")
+        os.replace(paths["validated"] + ".tmp", paths["validated"])
         record = {"version": built.get("version"),
-                  "commit": git(settings, "rev-parse", "HEAD"),
+                  "commit": head,
                   "kconfig": kconfig,
                   "built": datetime.datetime.now().isoformat(timespec="seconds"),
                   "bin_sha256": sha256(paths["bin"]),
                   "dict_sha256": sha256(paths["dict"])}
-        with open(paths["record"] + ".tmp", "w") as f:
-            json.dump(record, f, indent=2)
-        os.replace(paths["record"] + ".tmp", paths["record"])
+        write_json(paths["record"], record)
         say("Build validated: %s" % paths["bin"])
 
 
+def call(cmd, **kwargs):
+    try:
+        return subprocess.run(cmd, **kwargs)
+    except OSError as e:
+        raise Error("cannot run %s: %s" % (cmd[0], e.strerror))
+
+
+def failure(what, returncode):
+    if returncode < 0:
+        return "%s was killed by signal %d" % (what, -returncode)
+    return "%s failed with exit status %d" % (what, returncode)
+
+
 def run(cmd):
-    res = subprocess.run(cmd)
+    res = call(cmd)
     if res.returncode:
-        raise Error("%s failed with exit status %d"
-                    % (" ".join(cmd[:1] + cmd[-1:]), res.returncode))
+        raise Error(failure(" ".join(cmd[:1] + cmd[-1:]), res.returncode))
 
 
 def report_kconfig_changes(before, after):
@@ -537,11 +650,99 @@ def flasher(settings):
     return [python, script]
 
 
+def card_name(settings):
+    """The name under which the board's bootloader takes new firmware from
+    its SD card, as spi_flash.py uploads it, for copying a build there by
+    hand. None if BOARD is unknown or needs a converted file rather than a
+    copy of klipper.bin."""
+    path = os.path.join(settings["KLIPPER_DIR"], "scripts", "spi_flash",
+                        "board_defs.py")
+    defs = {}
+    try:
+        with open(path) as f:
+            # exec, not import: importing would leave bytecode in Klipper's
+            # checkout.
+            exec(compile(f.read(), path, "exec"), defs)
+        board = defs["lookup_board"](settings["BOARD"])
+    except Exception:
+        return None
+    if not board or board.get("conversion_script"):
+        return None
+    name = board.get("firmware_path", "firmware.bin")
+    if board.get("requires_unique_fw_name"):
+        head, tail = os.path.split(name)
+        name = os.path.join(head, time.strftime("%Y%m%d%H%M%S") + tail)
+    return name
+
+
+LOG_RECORD = re.compile(r"(DEBUG|INFO|WARNING|ERROR|CRITICAL):[^:]*:(.*)$")
+
+
+def last_exception(lines):
+    """The exception at the end of a printed traceback: the one a handler
+    caught, after any it was raised while handling. Its message may span
+    lines: often a first line, then a note wrapped at about 60 columns."""
+    starts = [i for i, l in enumerate(lines) if l.startswith("Traceback ")]
+    found = []
+    for line in lines[starts[-1] + 1:] if starts else ():
+        if not found and line[:1].isspace():
+            continue
+        if not line:
+            break
+        found.append(line.strip())
+    if len(found) > 2:
+        found[1:] = [" ".join(found[1:])]
+    return "; ".join(found)
+
+
+def flasher_errors(path):
+    """The flasher's own errors in its debug log, each with its exception.
+
+    With -v, spi_flash.py logs LEVEL:logger:message lines to stderr, and
+    its logging.exception() calls add a traceback through spi_flash.py.
+    Errors from Klipper's serial code while it reconnects after the reset
+    are left out: they are retries. Output before the first record, e.g.
+    a crash on import or an argument error, counts too."""
+    records = [(None, [])]
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                line = line.rstrip()
+                m = LOG_RECORD.match(line)
+                if m:
+                    records.append((m.group(1), [m.group(2)]))
+                else:
+                    records[-1][1].append(line)
+    except OSError:
+        return []
+    errors = []
+    for level, lines in records:
+        if level is None:
+            exc = last_exception(lines)
+            plain = [l for l in lines if l and not l[0].isspace()]
+            text = exc or (plain[-1] if plain else None)
+        elif level in ("ERROR", "CRITICAL") and any(
+                'spi_flash.py"' in l for l in lines[1:]):
+            exc = last_exception(lines[1:])
+            text = "%s (%s)" % (lines[0], exc) if exc else lines[0]
+        else:
+            continue
+        if text and text not in errors:
+            errors.append(text)
+    return errors
+
+
 def check_board_name(settings):
-    res = subprocess.run(flasher(settings) + ["-l"], stdout=subprocess.PIPE,
-                         universal_newlines=True)
-    boards = res.stdout.split()
-    if res.returncode or settings["BOARD"].lower() not in boards:
+    res = call(flasher(settings) + ["-l"], stdout=subprocess.PIPE,
+               stderr=subprocess.PIPE, universal_newlines=True)
+    if res.returncode:
+        # E.g. a KLIPPY_ENV broken by an OS upgrade: show why, not "unknown",
+        # and keep the whole traceback in the journal.
+        sys.stderr.write(res.stderr)
+        lines = res.stderr.strip().splitlines()
+        raise Error(failure("spi_flash.py -l", res.returncode)
+                    + (": " + lines[-1] if lines else ""))
+    if settings["BOARD"].lower() not in res.stdout.split():
         raise Error("spi_flash.py does not know BOARD=%s (see spi_flash.py -l)"
                     % settings["BOARD"])
 
@@ -549,8 +750,7 @@ def check_board_name(settings):
 def cmd_preflight(settings, args):
     build = load_build(settings)
     if not os.path.exists(settings["DEVICE"]):
-        raise Error("the board is not connected (%s is missing). Is the "
-                    "printer switched on?" % settings["DEVICE"])
+        raise Error(board_missing(settings))
     check_board_name(settings)
     kstatus = klippy_status(settings, {"print_stats": ["state"],
                                        "idle_timeout": ["state"]})
@@ -580,15 +780,88 @@ def cmd_flash(settings, args):
         if not os.path.exists(settings["DEVICE"]):
             raise Error("the board is not connected (%s is missing)"
                         % settings["DEVICE"])
-        cmd = (flasher(settings) + shlex.split(settings["FLASH_ARGS"])
+        # -v sends the flasher's debug log to stderr. It is the only place
+        # that says why an SD card failed to start, so keep it in a file.
+        cmd = (flasher(settings) + ["-v"] + shlex.split(settings["FLASH_ARGS"])
                + ["-d", paths["dict"], settings["DEVICE"], settings["BOARD"],
                   paths["bin"]])
+        # For report: systemd gives every run its own INVOCATION_ID.
+        record = {"invocation": os.environ.get("INVOCATION_ID"),
+                  "version": build["version"], "commit": build["commit"],
+                  "started": datetime.datetime.now().isoformat(
+                      timespec="seconds"),
+                  "result": None}
+        write_json(paths["flash_record"], record)
         say("Flashing %s to %s" % (build["version"], settings["DEVICE"]))
-        res = subprocess.run(cmd)
+        with open(paths["flash_log"], "w") as log:
+            res = call(cmd, stderr=log)
+        record["result"] = "failed" if res.returncode else "success"
+        write_json(paths["flash_record"], record)
         if res.returncode:
-            raise Error("spi_flash.py failed with exit status %d"
-                        % res.returncode)
+            for e in flasher_errors(paths["flash_log"]):
+                say("error: %s" % e)
+            raise Error("%s; its debug log is %s"
+                        % (failure("spi_flash.py", res.returncode),
+                           paths["flash_log"]))
         say("Flashed %s" % build["version"])
+
+
+def cmd_report(settings, args):
+    paths = build_paths(settings)
+    try:
+        with open(paths["flash_record"]) as f:
+            flashed = json.load(f)
+    except (OSError, ValueError):
+        raise Error("no flash on record in %s" % paths["dir"])
+    invocation = os.environ.get("INVOCATION_ID")
+    if invocation and flashed.get("invocation") != invocation:
+        return    # this run of the unit did not get as far as flashing
+    if not invocation:
+        say("Last flash: %s at %s (%s)" % (
+            flashed.get("version"), flashed.get("started"),
+            flashed.get("result") or "did not finish"))
+    start = time.monotonic()
+    waiting = False
+    while True:
+        try:
+            kstatus = klippy_status(settings, {"mcu": ["mcu_version"]})
+        except Error:
+            kstatus = None    # e.g. too busy starting up to answer
+        state = kstatus and kstatus.running and kstatus.info.get("state")
+        if state and state != "startup":
+            break
+        elapsed = time.monotonic() - start
+        starting = bool(state) or service_state(settings) in (
+            "active", "activating", "reloading", "refreshing")
+        # Allow a moment for the start that the unit has just queued.
+        if not starting and elapsed >= 3:
+            say("Klipper is not running, so what the board runs is not "
+                "known until it starts")
+            return
+        if elapsed >= args.timeout:
+            raise Error("Klipper has not finished starting after %d s" % elapsed)
+        if starting and not waiting:
+            say("Waiting for Klipper (up to %d s)" % args.timeout)
+            waiting = True
+        time.sleep(1)
+    version = kstatus.objects.get("mcu", {}).get("mcu_version")
+    message = (kstatus.info.get("state_message") or "").strip()
+    message = message.splitlines()[0] if message else "no message"
+    say("Klipper is %s" % state + (" after %d s" % (time.monotonic() - start)
+                                     if waiting else ""))
+    if not version:
+        raise Error("Klipper is %s and has not identified the board: %s"
+                    % (state, message))
+    if flashed.get("result") != "success":
+        say("The board still runs %s; the flash %s" % (
+            version, "failed" if flashed.get("result") else "did not finish"))
+    elif commit_of(settings, version) == flashed.get("commit"):
+        say("The board runs %s, the build that was flashed" % version)
+    else:
+        raise Error("the board runs %s, not the build that was flashed (%s)"
+                    % (version, flashed.get("version")))
+    if state != "ready":
+        raise Error("Klipper is %s: %s" % (state, message))
 
 
 def main():
@@ -608,6 +881,11 @@ def main():
                    ).set_defaults(func=cmd_preflight)
     sub.add_parser("flash", help="flash the last validated build"
                    ).set_defaults(func=cmd_flash)
+    p = sub.add_parser("report", help="after a flash, wait for Klipper and "
+                       "show what the board runs")
+    p.add_argument("--timeout", type=int, default=60, metavar="SECONDS",
+                   help="how long to wait for Klipper (default: 60)")
+    p.set_defaults(func=cmd_report)
     args = parser.parse_args()
     path = (args.config or os.environ.get("KLIPPER_MCU_FLASH_CONF")
             or os.path.expanduser(DEFAULT_SETTINGS))

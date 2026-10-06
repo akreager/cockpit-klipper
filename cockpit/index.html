@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Klipper MCU</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="mcu.css" rel="stylesheet">
+    <script src="../base1/cockpit.js"></script>
+</head>
+<body>
+<main class="page">
+    <div class="side">
+        <div id="setup-error" class="alert danger" hidden></div>
+        <div id="page-error" class="alert danger" hidden></div>
+
+        <div id="running" class="alert warning" hidden>
+            <strong>A flash run is in progress.</strong>
+            Until it has finished, do not switch the printer off, restart Klipper,
+            or update or restart Moonraker. Closing this page does not stop the run.
+        </div>
+
+        <section class="card">
+            <header class="card-head">
+                <h1>Klipper MCU firmware</h1>
+                <button id="refresh" class="link" type="button">Refresh</button>
+            </header>
+            <p id="summary" class="summary">Reading status…</p>
+            <div id="status-error" class="alert danger" hidden></div>
+            <div id="recover" class="alert warning" hidden>
+                <strong>The board cannot be flashed from here.</strong>
+                The flasher works through the Klipper firmware on the board, and the
+                board does not show up on USB. Check its USB cable.
+                <span id="recover-how"></span>
+            </div>
+            <dl class="facts">
+                <dt>Host Klipper</dt><dd id="host">…</dd>
+                <dt>Board</dt><dd id="board">…</dd>
+                <dt>Printer</dt><dd id="device">…</dd>
+                <dt>Klipper</dt><dd id="klipper">…</dd>
+                <dt>Last build</dt><dd class="with-link"><span id="build">…</span><button id="download" class="link" type="button" hidden>Download</button></dd>
+                <dt>Settings</dt><dd id="settings">…</dd>
+            </dl>
+            <div class="actions">
+                <button id="flash" class="primary" type="button" disabled>Build and flash</button>
+                <button id="build-only" class="secondary" type="button" disabled>Build only</button>
+                <span id="action-note" class="note"></span>
+            </div>
+            <div id="confirm" class="confirm" hidden>
+                <p id="confirm-text"></p>
+                <div class="actions">
+                    <button id="confirm-flash" class="danger" type="button">Flash now</button>
+                    <button id="confirm-cancel" class="secondary" type="button">Cancel</button>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <section class="card output">
+        <header class="card-head">
+            <h2 id="output-title">Output</h2>
+            <span id="output-state" class="badge" hidden></span>
+        </header>
+        <p id="output-summary" class="note">No run or build yet.</p>
+        <pre id="log" class="log" hidden></pre>
+    </section>
+</main>
+<script src="mcu.js"></script>
+</body>
+</html>

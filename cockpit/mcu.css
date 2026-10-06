@@ -1,0 +1,303 @@
+/* Cockpit's own pages bundle PatternFly; this page only borrows its fonts
+ * and approximates its colours. pf-v6-theme-dark is set by mcu.js. */
+
+@font-face {
+    font-family: RedHatText;
+    src: url(../../static/fonts/RedHatText-Regular.woff2) format("woff2");
+    font-weight: 400;
+    font-display: fallback;
+}
+
+@font-face {
+    font-family: RedHatText;
+    src: url(../../static/fonts/RedHatText-Medium.woff2) format("woff2");
+    font-weight: 500;
+    font-display: fallback;
+}
+
+@font-face {
+    font-family: RedHatText;
+    src: url(../../static/fonts/RedHatText-Bold.woff2) format("woff2");
+    font-weight: 700;
+    font-display: fallback;
+}
+
+@font-face {
+    font-family: RedHatMono;
+    src: url(../../static/fonts/RedHatMono-Regular.woff2) format("woff2");
+    font-weight: 400;
+    font-display: fallback;
+}
+
+:root {
+    color-scheme: light;
+    --bg: #f2f2f2;
+    --card: #ffffff;
+    --text: #151515;
+    --muted: #4d4d4d;
+    --border: #c7c7c7;
+    --log-bg: #f8f8f8;
+    --primary: #0066cc;
+    --primary-hover: #004d99;
+    --on-primary: #ffffff;
+    --danger: #b1380b;
+    --danger-hover: #731f00;
+    --on-danger: #ffffff;
+    --ok-bg: #e9f7df;
+    --ok-text: #204d00;
+    --ok-line: #3d7317;
+    --warn-bg: #fff4cc;
+    --warn-text: #73480b;
+    --warn-line: #dca614;
+    --err-bg: #fbeae5;
+    --err-text: #731f00;
+    --err-line: #b1380b;
+    --info-bg: #e0f0ff;
+    --info-text: #003366;
+    --info-line: #4394e5;
+}
+
+:root.pf-v6-theme-dark {
+    color-scheme: dark;
+    --bg: #151515;
+    --card: #292929;
+    --text: #ffffff;
+    --muted: #c7c7c7;
+    --border: #707070;
+    --log-bg: #1f1f1f;
+    --primary: #92c5f9;
+    --primary-hover: #b9dafc;
+    --on-primary: #151515;
+    --danger: #f89b78;
+    --danger-hover: #fbbea8;
+    --on-danger: #151515;
+    --ok-bg: #204d00;
+    --ok-text: #d1f0ba;
+    --ok-line: #87bb62;
+    --warn-bg: #4d3800;
+    --warn-text: #ffe072;
+    --warn-line: #ffcc17;
+    --err-bg: #4d1300;
+    --err-text: #fbbea8;
+    --err-line: #f0561d;
+    --info-bg: #002952;
+    --info-text: #b9dafc;
+    --info-line: #4394e5;
+}
+
+html {
+    background: var(--bg);
+}
+
+body {
+    margin: 0;
+    color: var(--text);
+    font-family: RedHatText, "Red Hat Text", "Helvetica Neue", Arial, sans-serif;
+    font-size: 0.875rem;
+    line-height: 1.5;
+}
+
+/* One column; side by side when there is room, with the output card no
+ * taller than the window, so the log scrolls rather than the page. */
+.page, .side {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.page {
+    max-width: 64rem;
+    padding: 1.5rem;
+}
+
+@media (min-width: 75rem) {
+    .page {
+        display: grid;
+        grid-template-columns: minmax(28rem, 36rem) minmax(0, 1fr);
+        align-items: start;
+        max-width: 140rem;
+    }
+
+    .output {
+        display: flex;
+        flex-direction: column;
+        max-height: calc(100vh - 3rem);
+    }
+
+    .output .log {
+        flex: 0 1 auto;
+        min-height: 0;
+        max-height: none;
+    }
+}
+
+.card {
+    box-sizing: border-box;
+    background: var(--card);
+    border-radius: 1rem;
+    padding: 1.5rem;
+}
+
+.card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+h1, h2 {
+    margin: 0;
+    font-size: 1.125rem;
+    font-weight: 500;
+}
+
+.summary {
+    margin: 0.75rem 0 1rem;
+    font-weight: 500;
+}
+
+.summary.ok { color: var(--ok-line); }
+.summary.warn { color: var(--warn-text); }
+
+.facts {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.5rem 1.5rem;
+    margin: 0 0 1.5rem;
+}
+
+.facts dt {
+    color: var(--muted);
+}
+
+.facts dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.facts dd.with-link {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 0.75rem;
+}
+
+.facts button.link {
+    padding: 0;
+}
+
+@media (max-width: 30rem) {
+    .facts { grid-template-columns: 1fr; gap: 0; }
+    .facts dd { margin-bottom: 0.5rem; }
+}
+
+.actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    flex-wrap: wrap;
+}
+
+.note {
+    color: var(--muted);
+}
+
+button {
+    font: inherit;
+    border-radius: 999px;
+    padding: 0.375rem 1rem;
+    border: 1px solid transparent;
+    cursor: pointer;
+}
+
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+button.primary {
+    background: var(--primary);
+    color: var(--on-primary);
+}
+
+button.primary:hover:enabled { background: var(--primary-hover); }
+
+button.danger {
+    background: var(--danger);
+    color: var(--on-danger);
+}
+
+button.danger:hover:enabled { background: var(--danger-hover); }
+
+button.secondary {
+    background: transparent;
+    color: var(--primary);
+    border-color: var(--primary);
+}
+
+button.link {
+    background: transparent;
+    color: var(--primary);
+    padding: 0.375rem 0;
+}
+
+button:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+.confirm {
+    margin-top: 1rem;
+    padding: 1rem;
+    border-left: 3px solid var(--warn-line);
+    background: var(--warn-bg);
+    color: var(--warn-text);
+}
+
+.confirm p { margin: 0 0 1rem; }
+
+.alert {
+    padding: 0.75rem 1rem;
+    border-left: 3px solid;
+    border-radius: 0.25rem;
+}
+
+/* Error alerts hold command output, which may have line breaks. */
+.alert.danger { background: var(--err-bg); color: var(--err-text); border-color: var(--err-line); white-space: pre-wrap; }
+.alert.warning { background: var(--warn-bg); color: var(--warn-text); border-color: var(--warn-line); }
+.card .alert { margin-bottom: 1rem; }
+
+.badge {
+    border-radius: 999px;
+    padding: 0.125rem 0.75rem;
+    font-weight: 500;
+    font-size: 0.8125rem;
+}
+
+.badge.running { background: var(--info-bg); color: var(--info-text); }
+.badge.ok { background: var(--ok-bg); color: var(--ok-text); }
+.badge.failed { background: var(--err-bg); color: var(--err-text); }
+.badge.unknown { background: var(--warn-bg); color: var(--warn-text); }
+
+#output-summary { margin: 0.75rem 0; }
+#output-summary.failed { color: var(--err-text); }
+
+.log {
+    margin: 0;
+    max-height: min(32rem, 60vh);
+    overflow: auto;
+    padding: 0.75rem 1rem;
+    background: var(--log-bg);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    font-family: RedHatMono, "Red Hat Mono", "Liberation Mono", monospace;
+    font-size: 0.8125rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.log .error { color: var(--err-text); font-weight: 700; }
+.log .warning { color: var(--warn-text); }
+.log .end { font-weight: 700; }
