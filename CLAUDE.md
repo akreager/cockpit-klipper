@@ -13,14 +13,21 @@ SKR 1.3 from v0.13.0-745 to v0.13.0-786, with Klipper down for 14 s (see
 "The unit"). The failure paths were tested first: printer off, print
 running, and a bad SD card. The Cockpit page (`cockpit/`) works in
 Cockpit 362: Build only, and a Build and flash run that failed at the SD
-card. Next: a real flash from the page with a name-brand card, because
-the card that flashed 786 has failed every run since.
-On 2026-10-05 the SKR 1.3 no longer showed up on USB, although the printer
-was on, after being off since 2026-10-03 with no flash in between (see "The
-board does not show up on USB" under "Risks"). Since then the page tells
-that apart from a printer that is off (`POWER_DEVICE`) and offers the last
-validated build for a flash by hand. Tested on the dev machine in a local
-Cockpit 360 and Firefox, not yet on the printer host.
+card.
+From 2026-10-04 the SKR 1.3 no longer showed up on USB. Its firmware had
+been damaged, by what is not known. On 2026-10-05 a flash by hand from a
+new Kingston 8 GB card brought it back on 786 (see "The board's firmware was
+damaged" under "Risks"). A failed upload leaves an incomplete
+`firmware.bin` on the card for the bootloader, and the tool does not
+remove it yet (see "How flashing works").
+On 2026-10-05 at 22:12 the first flash started from the page succeeded,
+with that card (see "The unit").
+Since 2026-10-05 the page tells a printer that is on but has no board from
+one that is off (`POWER_DEVICE`) and offers the last validated build for a
+flash by hand. Tested on the dev machine in a local Cockpit 360 and
+Firefox, not yet on the printer host, where `POWER_DEVICE` is not set yet.
+Next: try that on the printer host, and remove a failed upload's
+`firmware.bin` (see "The worker").
 Only one MCU per printer is supported: Klipper's `mcu`, one board per
 settings file. Extra `[mcu <name>]` boards are not handled yet.
 This file began as a handoff from a session in the private `printer-config`
@@ -107,26 +114,61 @@ Keep the tool generic.
   test a card without flashing, stop Klipper and run `spi_flash.py -c -v
   <device> <board> <klipper.bin>` by hand. `-c` goes through the same
   reset and card start-up but does not upload.
-  - The CR-10S's card answered CMD0 and CMD8, then never finished ACMD41
-    ("SD Card did not come out of IDLE after reset"). `_check_command`
-    tries 15 times, 0.1 s apart. That is a fault of the card itself,
-    whatever the SPI speed.
-  - A replacement card (120 MiB, standard capacity, FAT32) worked at the
-    default 400 kHz, with both the flasher and the board's bootloader.
-    It is a no-name card (CID maker 0xC8, product "APPSD", made "5/2165").
-  - Later the same card failed twice while writing `firmware.bin` (15:27
-    and 15:29). It started up and mounted fine, but returned garbage
+  - Three cards so far (Allen's account on 2026-10-05, matched to the
+    flasher's output; only card 1 ever identified itself in a run):
+    1. The original no-name 128 MB card: CID maker 0xC8, product "APPSD",
+       serial 0x87, made "5/2165", 120 MiB, standard capacity, FAT32,
+       volume serial `D4BC-7F45`. It still reads on the dev machine.
+    2. A second no-name 128 MB card. It was in the board on 2026-10-05
+       and reads in no reader any more.
+    3. A new Kingston 8 GB card (CID maker 0x9F, OEM "TI", product
+       "SD8GB", made 11/2021; FAT32, label `CR10S_USD`), in the board
+       since the flash by hand on 2026-10-05. It worked at 400 kHz for the
+       first flash from the page the same evening.
+  - At 14:17 and 14:23 the card answered CMD0 and CMD8, then never
+    finished ACMD41 ("SD Card did not come out of IDLE after reset").
+    `_check_command` tries 15 times, 0.1 s apart. That is a fault of the
+    card itself, whatever the SPI speed. It never identified itself, so it
+    may have been either 128 MB card.
+  - At 14:53 card 1 worked at the default 400 kHz, with both the flasher
+    and the board's bootloader.
+  - At 15:27 and 15:28 card 1 failed while writing `firmware.bin`. It
+    started up and mounted fine, but returned garbage
     data-response tokens (`write error 0xC3`, `0x86`, `0x00`) or stayed
     busy (`could not leave busy state after write`; the flasher polls 128
-    times, one USB round trip each). The board was unaffected: Klipper
-    reset it after each run, its bootloader saw whatever was left on the
-    card, and it still booted 786.
-  - At 17:00, from the page, the same card no longer even started up:
-    "failed to reset SD Card", then "failed to mount SD Card, returned
-    FR_NOT_READY". Again the board kept 786.
+    times, one USB round trip each). The board seemed unaffected: Klipper
+    reset it after each run, and it booted 786. But the card kept an
+    empty `firmware.bin` (see below).
+  - At 17:00, from the page, the card in the board no longer even started
+    up: "failed to reset SD Card", then "failed to mount SD Card, returned
+    FR_NOT_READY". Again the board kept 786. It may have been either
+    128 MB card (see "The board's firmware was damaged" under "Risks").
+- **What `spi_flash.py` checks, and what it leaves behind** (verified
+  2026-10-05 in `spi_flash.py` at 786 and on the cards):
+  - Before it resets the board, it computes a SHA-1 of `klipper.bin` while
+    uploading, then reads `firmware.bin` back from the card and compares.
+    An upload error or a mismatch ends the run **without** a reset. The
+    file size is only printed.
+  - After the reset it requires the board's data dictionary to equal the
+    `-d` file. The bootloader checks nothing that we know of; there is no
+    source for BTT's.
+  - **A failed upload leaves its `firmware.bin` on the card, and nothing
+    removes it.** FatFS writes a file's size into the directory only on
+    close, so after a failed close (the `%d` bug below hides that error)
+    the file reads as 0 bytes. Card 1 still held a 0-byte
+    `firmware.bin` from 15:27 next to the 42,412-byte `FIRMWARE.CUR` from
+    14:53, read on the dev machine on 2026-10-05.
+  - The bootloader sees that file at every later reset or power-on. After
+    a failed run, the first reset comes within seconds: Klipper starts
+    again, finds the board configured by the flasher and resets it
+    (`Attempting automated MCU 'mcu' restart: CRC mismatch`).
+  - `spi_flash.py` writes FAT times in local time (`time.localtime()`).
+    FAT stores no time zone and Linux reads the times as UTC, so on a
+    computer the card's files show 4 hours early in EDT.
 - **Klipper bug (at 786):** `FatFile.close()` in `spi_flash.py` logs a
   failed close with `%d` but passes the `FRESULT` name, a string. The
-  resulting `TypeError` hides the close error. Not yet reported upstream.
+  resulting `TypeError` hides the close error. Not yet reported upstream,
+  nor that a failed upload leaves `firmware.bin` on the card.
 - **Build:**
   `make -C <klipper> KCONFIG_CONFIG=<file> OUT=<dir>/ olddefconfig`, then
   the same with `-j"$(nproc)"` instead of `olddefconfig`.
@@ -350,20 +392,27 @@ worker's full path and Klipper's service name, then installs it as
   ran by hand rather than through the unit so that a check that wrongly
   passed could not lead to an unplanned flash. The printer-off run had
   already shown how the unit handles a refusal at that step.
-- **First flash attempts, 2026-10-03:** two runs, at 400 kHz and with
-  `-s`. Each time the unit stopped Klipper, and `spi_flash.py` connected,
-  reset the board and reconnected. Then it failed to initialise the SD
-  card (see "How flashing works"). The run ended `Run finished:
-  exit-code`, and Klipper was started again after 14 s, still with the
-  old firmware. Mainsail's Update Manager had moved Klipper from 756 to
-  786 just before. The build of 786 validated against the board (41
-  commits behind) without trouble.
-- **First flash, 2026-10-03,** after the SD card was replaced:
+- **First flash attempts, 2026-10-03:** two runs (14:17 and 14:23), at
+  400 kHz and with `-s`. Each time the unit stopped Klipper, and
+  `spi_flash.py` connected, reset the board and reconnected. Then it
+  failed to initialise the SD card (see "How flashing works"). The run
+  ended `Run finished: exit-code`, and Klipper was started again after
+  14 s, still with the old firmware. Mainsail's Update Manager had moved
+  Klipper from 756 to 786 just before. The build of 786 validated against
+  the board (41 commits behind) without trouble.
+- **First flash, 2026-10-03** (14:53), after a card swap, with card 1:
   `sudo systemctl start` built 786 and stopped Klipper. `spi_flash.py`
   then uploaded and checked `firmware.bin` (42 KB), the bootloader
   installed it, and the dictionary check matched. Klipper started 14 s
   after it was stopped and reported `mcu_version` v0.13.0-786-g461c4e372.
   The whole run took 17 s and logged `Run finished: success`.
+- **First flash from the page, 2026-10-05** (22:12), with card 3, after
+  the board's firmware had been restored by hand: it rebuilt 786 ("the
+  board already runs this commit"), uploaded and read back `firmware.bin`
+  (42,412 bytes, the same SHA-1 as on 10-03), and the dictionary check
+  matched. Klipper was down for 14 s and ready 8 s after its start;
+  `report` confirmed the flashed build. The whole run took 25 s and
+  logged `Run finished: success`.
 
 ### The worker (`bin/klipper-mcu-flash`)
 
@@ -483,6 +532,12 @@ journal and the page.
   overlap.
 - **Not done (optional later):** send a `RESPOND` through the API
   socket's `gcode/script` so Mainsail and KlipperScreen show what happened.
+- **Not done: removing a failed upload's `firmware.bin`.** After a failed
+  upload `report` says only that the board still runs the old build, while
+  an incomplete `firmware.bin` waits on the card for the bootloader (see
+  "How flashing works"). Proposed 2026-10-05: delete it before Klipper is
+  started again, e.g. with the flasher's own FatFS code, and keep Klipper
+  stopped with a clear error when that fails. Not designed yet.
 - **`flash -v` and `report` (2026-10-03)** were tested in a scratch
   `BUILD_DIR` with a stand-in flasher: a card failure, a crash on import,
   success, and `report` against the real Klipper (read-only), a run that
@@ -602,7 +657,11 @@ ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu
   dictionary before Klipper is stopped.
 - **No SD card or a bad one:** the upload fails and the old firmware
   stays. Klipper is restarted and nothing changes (verified 2026-10-03,
-  with a card that would not finish initialising).
+  with a card that would not finish initialising). But a card that fails
+  *during* the upload keeps an incomplete `firmware.bin`, which the
+  bootloader sees at every later reset (see "How flashing works"). Until
+  the tool removes it, take the card out after such a failure and delete
+  the file, or replace it with `validated.bin`.
 - **Klipper restarted from Mainsail or KlipperScreen mid-flash:** both
   processes want the port exclusively, so verification may fail. Re-run
   it; the firmware is usually already written. Masking Klipper during the
@@ -625,19 +684,55 @@ ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu
   `ExecStopPost=` starts it again, and Klipper then waits for the board.
 - **Printer powered off:** the device is missing. Fail fast with a clear
   message before anything is stopped.
-- **The board does not show up on USB although the printer is on** (seen
-  2026-10-05):
-  - At every power-on the kernel logged `device descriptor read/64, error
-    -71` … `unable to enumerate USB device` on the port where the board had
-    been `1d50:614e Klipper lpc1768`.
-  - The last flash run (2026-10-03 17:00) had failed at the SD card and left
-    the board on 786. The board then ran until the printer was switched off
-    at 21:02, and nothing was flashed before it failed.
-  - The flasher cannot help (see "Settled decisions").
-  - Rule out the USB cable, then the SD card: boot without it. A
-    `FIRMWARE.CUR` on the card means the bootloader took a `firmware.bin`
-    from it.
-  - Then flash by hand with `validated.bin` (README, "Troubleshooting").
+- **The board does not show up on USB although the printer is on:** the
+  flasher cannot help (see "Settled decisions"). Rule out the USB cable and
+  the host's port, then the SD card: boot without it. Then flash by hand
+  with `validated.bin` (README, "Troubleshooting"). Afterwards the card
+  should hold `FIRMWARE.CUR` and no `firmware.bin`.
+- **The board's firmware was damaged** (2026-10-04 to 10-05; cause not
+  known):
+  - From 2026-10-04 the board failed to enumerate at every power-on: `device
+    descriptor read/64, error -71` … `unable to enumerate USB device`, where
+    it had been `1d50:614e Klipper lpc1768`. The first time was 12:11 on
+    10-04, three attempts in 6 s, while Moonraker had the printer off and
+    logged no power change. What happened then is not known.
+  - Before that: the 786 flash at 14:53 on 10-03 was verified (read back,
+    dictionary matched). The board was reset at least five times more that
+    day and booted 786 each time, and ran until the printer was switched
+    off at 21:02. The tool flashed nothing after 14:53.
+  - Ruled out on 10-05: the SD card (boot without it), the host port (1-2
+    instead of 1-6) and the cable (a second one). Same errors each time.
+  - Fixed on 10-05 at 21:21: `validated.bin` (786, SHA-256 `37cd7097…`,
+    byte-identical to the 10-03 builds) copied as `firmware.bin` to card
+    3, the new Kingston 8 GB card. The kernel logged the same -71
+    errors for 2 s while the bootloader ran, then the board enumerated as
+    Klipper. The card then held only `FIRMWARE.CUR` with the same hash. So
+    the application in flash was damaged, and the board's USB hardware is
+    fine. Moonraker had logged no power change, so Klipper needed a
+    `FIRMWARE_RESTART` by hand.
+  - Only the bootloader writes the application area here, and only from a
+    `firmware.bin` on the card. Candidates:
+    - The empty `firmware.bin` the failed 15:27 upload left on card 1
+      (see "How flashing works" for the cards). A bootloader that copies
+      0 bytes might erase the start of the application and skip the
+      rename. Against it: the board booted 786 after three resets with
+      card 1 certainly in place (Klipper after the 15:27 and 15:28 runs,
+      the flasher at the start of the 15:28 run), and the flasher mounted
+      card 1 right after one of them.
+    - Card 1 was not in the board when it failed. On 10-05 the board held
+      card 2, which read neither in a SanDisk SDDR-113 reader on the host
+      ("Media removed") nor on the dev machine. When card 2 went in is not
+      recorded. If it was before 17:00 on 10-03, card 1's empty file was
+      never in the board after that day.
+    - With a card that does not start up, the bootloader should just start
+      the application. A bootloader misreading a failing card is the
+      remaining guess.
+  - Not tested (decided 2026-10-05, no intentional brick): whether this
+    bootloader damages the application when it finds an empty
+    `firmware.bin` on a good card. That would settle the first candidate;
+    recovery would be the same flash by hand.
+  - Watch for: the board missing from USB after a power-on or reset, and a
+    `firmware.bin` left on the card after a failed upload.
 - **During a print:** `preflight` refuses.
 - **Downtime:** Klipper is down for about 15 s per flash (14 s measured
   on the SKR 1.3, 2026-10-03). The build runs before Klipper stops.
@@ -726,8 +821,8 @@ ln -s ~/cockpit-klipper/cockpit ~/.local/share/cockpit/klipper-mcu
   4. After the first real flash, confirm the board's `mcu_version` equals
      the host version in klippy.log or Mainsail. Done 2026-10-03: both
      v0.13.0-786-g461c4e372.
-  5. Still to do: a successful flash started from the page, with a new
-     card.
+  5. A successful flash started from the page. Done 2026-10-05 with
+     card 3 (Kingston 8 GB).
 - `printer-config` workflow: edit → commit → push to Gitea → the printer
   pulls through Mainsail's Update Manager. Printer-side edits go back with
   the `PUSH_CONFIG` macro. Files there also appear in Mainsail's config

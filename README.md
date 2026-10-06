@@ -107,8 +107,12 @@ see "Failure to Initialize" in Klipper's `docs/SDCard_Updates.md`.
 
 **"Error Uploading Firmware"** with `write error 0x..` or `could not leave
 busy state after write`: the card starts up but fails while writing. Try
-another card, preferably a name-brand one. The board keeps its old
-firmware.
+another card, preferably a name-brand one. The board keeps its old firmware
+for now, but the failed upload can leave an incomplete `firmware.bin` on
+the card, and the board's bootloader looks for that file at every reset and
+power-on. Take the card out and delete the file on a computer, or replace
+it with a good build (see "Flash by hand" below). If the board no longer
+shows up on USB, see the next item.
 
 **The printer is on, but the board does not show up on USB.** Neither the
 page nor the service can flash it then: Klipper's SD-card flasher works
@@ -129,7 +133,7 @@ mean that something is attached but does not answer. Check, in this order:
    comes back, look at the card on a computer: a `FIRMWARE.CUR` on it means
    the bootloader flashed a `firmware.bin` from that card. Use a FAT32 card,
    preferably 32 GB or smaller.
-3. Flash by hand. Every build that passes validation is also kept as
+3. **Flash by hand.** Every build that passes validation is also kept as
    `~/.cache/klipper-mcu-flash/validated.bin` (run *Build only* if there is
    none yet). The page's *Download* button saves it under the name the
    board's bootloader looks for (`firmware.bin` for most boards; while the
